@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { generateBrandIdentity, translateBrandIdentity, buildIdentityFromLogo, generateMarketingAssets, rebrandLogoAndBuildIdentity, regenerateLogoAndConcepts, generatePrimaryLogo } from './services/geminiService';
-import type { BrandIdentity, BrandAssets } from './types';
+import { generateBrandIdentity, translateBrandIdentity, buildIdentityFromLogo, rebrandLogoAndBuildIdentity, regenerateLogoAndConcepts, generateLogoMark } from './services/geminiService';
+import type { BrandIdentity } from './types';
 import BrandBible from './components/BrandBible';
 import BrandAssetsComponent from './components/BrandAssets';
 import DocumentTemplates from './components/DocumentTemplates';
@@ -90,7 +90,6 @@ const AppContent: React.FC = () => {
   // State for results
   const [originalBrandBible, setOriginalBrandBible] = useState<BrandIdentity | null>(null);
   const [translatedBrandBible, setTranslatedBrandBible] = useState<BrandIdentity | null>(null);
-  const [generatedAssets, setGeneratedAssets] = useState<BrandAssets | null>(null);
   const [originalLang, setOriginalLang] = useState<'en' | 'ar' | null>(null);
 
   // Status states
@@ -109,9 +108,6 @@ const AppContent: React.FC = () => {
   const clearResults = () => {
     setOriginalBrandBible(null);
     setTranslatedBrandBible(null);
-    setGeneratedAssets(null);
-    setOriginalLang(null);
-    setGeneratedAssets(null);
     setOriginalLang(null);
     setShowDocuments(false);
     setError(null);
@@ -145,14 +141,25 @@ const AppContent: React.FC = () => {
         setOriginalLang(lang);
 
         setIsLoadingLogo(true);
-        const primaryLogoUrl = await generatePrimaryLogo(identity);
-        setOriginalBrandBible(prev => prev ? { ...prev, logoImage: primaryLogoUrl } : null);
+        // Generate icon-only logo mark (no text) - text is composited by LogoCompositor
+        const logoMarkUrl = await generateLogoMark(identity);
+        setOriginalBrandBible(prev => prev ? { ...prev, logoMark: logoMarkUrl, logoImage: logoMarkUrl } : null);
         setIsLoadingLogo(false);
       }
       // --- Persona 3: The Prepared Professional ---
+      // User has logo, colors, and fonts - build identity and show template-based assets
       else if (hasProvidedAssets && brandColors && brandFonts.header && brandFonts.body) {
-        const assets = await generateMarketingAssets(providedCompanyName, uploadedLogo!, brandColors, brandFonts, lang);
-        setGeneratedAssets(assets);
+        const identity = await buildIdentityFromLogo(mission, providedCompanyName, uploadedLogo!, lang);
+        const logoUrl = URL.createObjectURL(uploadedLogo!);
+        identity.logoImage = logoUrl;
+        // Override fonts with user-provided ones
+        identity.fontPairings = {
+          header: brandFonts.header,
+          body: brandFonts.body,
+          notes: `User-specified fonts: ${brandFonts.header} for headers, ${brandFonts.body} for body.`
+        };
+        setOriginalBrandBible(identity);
+        setOriginalLang(lang);
       }
       // --- Persona 2: The Semi-Prepared Entrepreneur ---
       else if (hasProvidedAssets) {
@@ -170,8 +177,9 @@ const AppContent: React.FC = () => {
         setOriginalLang(lang);
 
         setIsLoadingLogo(true);
-        const primaryLogoUrl = await generatePrimaryLogo(identity);
-        setOriginalBrandBible(prev => prev ? { ...prev, logoImage: primaryLogoUrl } : null);
+        // Generate icon-only logo mark (no text) - text is composited by LogoCompositor
+        const logoMarkUrl = await generateLogoMark(identity);
+        setOriginalBrandBible(prev => prev ? { ...prev, logoMark: logoMarkUrl, logoImage: logoMarkUrl } : null);
         setIsLoadingLogo(false);
       }
     } catch (err: any) {
@@ -221,7 +229,7 @@ const AppContent: React.FC = () => {
     setError(null);
 
     // Clear old logo images before generating new ones
-    setOriginalBrandBible(prev => prev ? { ...prev, logoImage: undefined } : null);
+    setOriginalBrandBible(prev => prev ? { ...prev, logoImage: undefined, logoMark: undefined } : null);
     setTranslatedBrandBible(null);
 
     try {
@@ -230,8 +238,9 @@ const AppContent: React.FC = () => {
       const updatedBible = { ...originalBrandBible, logo, logoConcepts };
       setOriginalBrandBible(updatedBible);
 
-      const primaryLogoUrl = await generatePrimaryLogo(updatedBible);
-      setOriginalBrandBible(prev => prev ? { ...prev, logoImage: primaryLogoUrl } : null);
+      // Generate icon-only logo mark (no text) - text is composited by LogoCompositor
+      const logoMarkUrl = await generateLogoMark(updatedBible);
+      setOriginalBrandBible(prev => prev ? { ...prev, logoMark: logoMarkUrl, logoImage: logoMarkUrl } : null);
 
     } catch (err) {
       console.error("Regeneration error:", err);
@@ -352,7 +361,7 @@ const AppContent: React.FC = () => {
               )}
             </div>
 
-            {(!originalBrandBible && !generatedAssets) && (
+            {!originalBrandBible && (
               <div className="pt-2">
                 <div className="w-full max-w-xs mx-auto bg-gray-100 p-1 rounded-full flex items-center">
                   <button onClick={() => setLanguage('en')} disabled={isLoading} className={`w-full px-4 py-1.5 rounded-full text-sm font-semibold transition-colors ${lang === 'en' ? 'bg-white text-gray-800 shadow-sm' : 'bg-transparent text-gray-500'}`} >{t('languageEnglish')}</button>
@@ -368,7 +377,7 @@ const AppContent: React.FC = () => {
           </div>
         </div>
 
-        {isLoading && !originalBrandBible && !generatedAssets && (
+        {isLoading && !originalBrandBible && (
           <div className="text-center mt-8 text-gray-600"><p>{t('loadingMessage')}</p></div>
         )}
 
@@ -400,8 +409,12 @@ const AppContent: React.FC = () => {
           </div>
         )}
 
-        {generatedAssets && (
-          <BrandAssetsComponent assets={generatedAssets} />
+        {/* Marketing Assets - show for any brand identity with a logo */}
+        {displayedBible && displayedBible.logoImage && (
+          <BrandAssetsComponent
+            identity={displayedBible}
+            logoUrl={displayedBible.logoMark || displayedBible.logoImage}
+          />
         )}
       </main>
       <ChatBot />

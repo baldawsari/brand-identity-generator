@@ -2,8 +2,10 @@ import React, { useState, useRef } from 'react';
 import { BrandIdentity } from '../types';
 import { saveAs } from 'file-saver';
 import PptxGenJS from 'pptxgenjs';
-import { Document, Packer, Paragraph, TextRun, ImageRun, Header, Footer, AlignmentType, Table, TableRow, TableCell, WidthType, ShadingType, BorderStyle, VerticalAlign } from 'docx';
+import { Document, Packer, Paragraph, TextRun, ImageRun, Header, Footer, AlignmentType, Table, TableRow, TableCell, WidthType, ShadingType, BorderStyle, VerticalAlign, convertInchesToTwip } from 'docx';
 import JSZip from 'jszip';
+import { fetchFontBuffer } from '../utils/fontRegistry';
+import { useLanguage } from '../LanguageContext';
 
 interface DocumentTemplatesProps {
     identity: BrandIdentity;
@@ -11,38 +13,84 @@ interface DocumentTemplatesProps {
 }
 
 const DocumentTemplates: React.FC<DocumentTemplatesProps> = ({ identity, lang }) => {
+    const { t } = useLanguage();
     const [activeTab, setActiveTab] = useState<'document' | 'presentation'>('document');
     const [logoPosition, setLogoPosition] = useState<{ vertical: 'header' | 'footer', horizontal: 'left' | 'center' | 'right' }>({
         vertical: 'header',
         horizontal: 'center'
     });
-    const contentRef = useRef<HTMLDivElement>(null);
+    const [isExporting, setIsExporting] = useState<string | null>(null);
+    const printRef = useRef<HTMLDivElement>(null);
 
-    // --- Helper to get brand font names ---
+    const isRtl = lang === 'ar';
+
     const getFonts = () => {
         const headerFont = identity.fontPairings.header;
         const bodyFont = identity.fontPairings.body;
         return { headerFont, bodyFont };
     };
 
-    // --- Helper to get brand colors ---
     const getColors = () => {
         const primary = identity.colorPalette[0]?.hex || '#2c3e50';
         const secondary = identity.colorPalette[1]?.hex || '#7f8c8d';
-        const text = '#222222';
-        return { primary, secondary, text };
+        const accent = identity.colorPalette[2]?.hex || '#e74c3c';
+        const text = '#1a1a1a';
+        return { primary, secondary, accent, text };
     };
 
     const { headerFont, bodyFont } = getFonts();
-    const { primary, secondary, text } = getColors();
+    const { primary, secondary, accent, text } = getColors();
     const logoUrl = identity.logoImage || '';
-    const isRtl = lang === 'ar';
     const companyName = identity.companyName;
 
-    const headerFontUrl = `https://fonts.googleapis.com/css2?family=${headerFont.replace(/ /g, '+')}:wght@700&display=swap`;
-    const bodyFontUrl = `https://fonts.googleapis.com/css2?family=${bodyFont.replace(/ /g, '+')}:wght@400&display=swap`;
+    const headerFontUrl = `https://fonts.googleapis.com/css2?family=${headerFont.replace(/ /g, '+')}:wght@400;500;600;700&display=swap`;
+    const bodyFontUrl = `https://fonts.googleapis.com/css2?family=${bodyFont.replace(/ /g, '+')}:wght@400;500&display=swap`;
 
-    // --- Shared doc creation logic ---
+    const getText = (key: string) => t(key as any) || key;
+
+    // Helper to determine text color based on background brightness
+    const getContrastColor = (hexColor: string): string => {
+        const hex = hexColor.replace('#', '');
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+        return brightness > 128 ? '#000000' : '#FFFFFF';
+    };
+
+    // Helper to detect if a light color needs a border to be visible on white backgrounds
+    const needsBorder = (hexColor: string): boolean => {
+        const hex = hexColor.replace('#', '');
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+        return brightness > 240; // Very light colors need border
+    };
+
+    // Helper to get slide logo position styles
+    const getSlideLogoStyle = (): React.CSSProperties => {
+        const isHeader = logoPosition.vertical === 'header';
+
+        let horizontalStyle: React.CSSProperties = {};
+        if (logoPosition.horizontal === 'center') {
+            horizontalStyle = { left: '50%', transform: 'translateX(-50%)' };
+        } else if (logoPosition.horizontal === 'left') {
+            horizontalStyle = isRtl ? { right: '30px' } : { left: '30px' };
+        } else {
+            horizontalStyle = isRtl ? { left: '30px' } : { right: '30px' };
+        }
+
+        return {
+            position: 'absolute',
+            [isHeader ? 'top' : 'bottom']: isHeader ? '20px' : '36px',
+            ...horizontalStyle,
+            height: '50px',
+            objectFit: 'contain',
+        };
+    };
+
+    // --- Create DOCX ---
     const createDoc = async () => {
         if (!logoUrl) throw new Error("No logo available.");
 
@@ -60,15 +108,24 @@ const DocumentTemplates: React.FC<DocumentTemplatesProps> = ({ identity, lang })
             logoBuffer = await res.arrayBuffer();
         }
 
-        const alignmentStart = isRtl ? AlignmentType.END : AlignmentType.START;
-        const alignmentCenter = AlignmentType.CENTER;
-        const bidi = isRtl;
+        const getAlignment = (position: 'left' | 'center' | 'right') => {
+            if (position === 'center') return AlignmentType.CENTER;
+            if (isRtl) {
+                return position === 'left' ? AlignmentType.RIGHT : AlignmentType.LEFT;
+            }
+            return position === 'left' ? AlignmentType.LEFT : AlignmentType.RIGHT;
+        };
 
         const doc = new Document({
             sections: [{
                 properties: {
                     page: {
-                        margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 },
+                        margin: {
+                            top: convertInchesToTwip(1),
+                            right: convertInchesToTwip(1),
+                            bottom: convertInchesToTwip(1),
+                            left: convertInchesToTwip(1)
+                        },
                     },
                 },
                 headers: {
@@ -78,11 +135,12 @@ const DocumentTemplates: React.FC<DocumentTemplatesProps> = ({ identity, lang })
                                 children: [
                                     new ImageRun({
                                         data: logoBuffer,
-                                        transformation: { width: 90, height: 90 },
+                                        transformation: { width: 70, height: 70 },
+                                        type: 'png',
                                     }),
                                 ],
-                                alignment: logoPosition.horizontal === 'left' ? (isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT) : logoPosition.horizontal === 'center' ? alignmentCenter : (isRtl ? AlignmentType.LEFT : AlignmentType.RIGHT),
-                                border: { bottom: { style: BorderStyle.SINGLE, size: 32, color: primary.replace('#', '') } },
+                                alignment: getAlignment(logoPosition.horizontal),
+                                spacing: { after: 200 },
                             }),
                         ],
                     }) : undefined,
@@ -90,171 +148,208 @@ const DocumentTemplates: React.FC<DocumentTemplatesProps> = ({ identity, lang })
                 footers: {
                     default: new Footer({
                         children: [
-                            new Paragraph({
-                                children: [
-                                    new TextRun({
-                                        text: `Confidential • Generated on ${new Date().toLocaleDateString()}`,
-                                        size: 18,
-                                        color: secondary.replace('#', ''),
-                                        bidi,
-                                    }),
-                                ],
-                                alignment: alignmentCenter,
-                                border: { top: { style: BorderStyle.SINGLE, size: 8, color: 'EEEEEE' } },
-                            }),
                             ...(logoPosition.vertical === 'footer' ? [new Paragraph({
                                 children: [
                                     new ImageRun({
                                         data: logoBuffer,
                                         transformation: { width: 50, height: 50 },
+                                        type: 'png',
                                     }),
                                 ],
-                                alignment: logoPosition.horizontal === 'left' ? (isRtl ? AlignmentType.RIGHT : AlignmentType.LEFT) : logoPosition.horizontal === 'center' ? alignmentCenter : (isRtl ? AlignmentType.LEFT : AlignmentType.RIGHT),
+                                alignment: getAlignment(logoPosition.horizontal),
+                                spacing: { after: 100 },
                             })] : []),
+                            new Paragraph({
+                                children: [
+                                    new TextRun({
+                                        text: `${getText('docConfidential')} • ${getText('docGeneratedOn')} ${new Date().toLocaleDateString(isRtl ? 'ar-SA' : 'en-US')}`,
+                                        size: 18,
+                                        color: secondary.replace('#', ''),
+                                        font: isRtl ? 'Arial' : bodyFont,
+                                    }),
+                                ],
+                                alignment: AlignmentType.CENTER,
+                                border: { top: { style: BorderStyle.SINGLE, size: 8, color: 'EEEEEE' } },
+                            }),
                         ],
                     }),
                 },
                 children: [
+                    // Company Name Title
                     new Paragraph({
                         children: [
                             new TextRun({
                                 text: companyName,
-                                font: headerFont,
-                                size: 64,
+                                size: 52,
                                 bold: true,
                                 color: primary.replace('#', ''),
-                                bidi,
+                                font: isRtl ? 'Arial' : headerFont,
                             }),
                         ],
-                        alignment: alignmentCenter,
-                        spacing: { after: 200 },
+                        alignment: AlignmentType.CENTER,
+                        spacing: { after: 80 },
+                        bidirectional: isRtl,
                     }),
+                    // Style subtitle
                     new Paragraph({
                         children: [
                             new TextRun({
-                                text: identity.logo.style,
-                                font: bodyFont,
-                                size: 28,
+                                text: identity.logo.style || '',
+                                size: 20,
                                 color: secondary.replace('#', ''),
-                                bidi,
+                                font: isRtl ? 'Arial' : bodyFont,
                             }),
                         ],
-                        alignment: alignmentCenter,
-                        spacing: { after: 800 },
+                        alignment: AlignmentType.CENTER,
+                        spacing: { after: 200 },
+                        bidirectional: isRtl,
                     }),
+                    // Divider line
+                    new Paragraph({
+                        children: [],
+                        border: { bottom: { style: BorderStyle.SINGLE, size: 24, color: primary.replace('#', '') } },
+                        spacing: { after: 400 },
+                    }),
+                    // Brand Overview Section
                     new Paragraph({
                         children: [
                             new TextRun({
-                                text: "Brand Overview",
-                                font: headerFont,
-                                size: 40,
-                                bold: true,
+                                text: getText('docBrandOverview'),
+                                size: 26,
                                 color: primary.replace('#', ''),
-                                bidi,
+                                font: isRtl ? 'Arial' : headerFont,
+                                italics: true,
                             }),
                         ],
-                        border: { bottom: { style: BorderStyle.SINGLE, size: 16, color: primary.replace('#', '') } },
-                        spacing: { before: 700, after: 200 },
+                        border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: primary.replace('#', '') } },
+                        spacing: { before: 200, after: 150 },
+                        bidirectional: isRtl,
                     }),
                     new Paragraph({
                         children: [
                             new TextRun({
-                                text: identity.logo.prompt,
-                                font: bodyFont,
-                                size: 24,
-                                bidi,
+                                text: identity.logo.prompt || '',
+                                size: 20,
+                                font: isRtl ? 'Arial' : bodyFont,
                             }),
                         ],
-                        alignment: alignmentStart,
-                        spacing: { after: 320 },
+                        spacing: { after: 300 },
+                        bidirectional: isRtl,
                     }),
+                    // Color Palette Section
                     new Paragraph({
                         children: [
                             new TextRun({
-                                text: "Color Palette",
-                                font: headerFont,
-                                size: 40,
-                                bold: true,
+                                text: getText('docColorPalette'),
+                                size: 26,
                                 color: primary.replace('#', ''),
-                                bidi,
+                                font: isRtl ? 'Arial' : headerFont,
+                                italics: true,
                             }),
                         ],
-                        border: { bottom: { style: BorderStyle.SINGLE, size: 16, color: primary.replace('#', '') } },
-                        spacing: { before: 700, after: 200 },
+                        border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: primary.replace('#', '') } },
+                        spacing: { before: 200, after: 150 },
+                        bidirectional: isRtl,
                     }),
                     new Table({
                         width: { size: 100, type: WidthType.PERCENTAGE },
                         rows: [
                             new TableRow({
-                                children: identity.colorPalette.map(color => new TableCell({
-                                    children: [
-                                        new Paragraph({}),
-                                        new Paragraph({
-                                            children: [new TextRun({ text: color.hex, bold: true, size: 22, bidi })],
-                                            alignment: alignmentCenter,
-                                        }),
-                                        new Paragraph({
-                                            children: [new TextRun({ text: color.name, size: 20, color: secondary.replace('#', ''), bidi })],
-                                            alignment: alignmentCenter,
-                                        }),
-                                    ],
-                                    shading: { fill: color.hex.replace('#', ''), type: ShadingType.SOLID, color: 'auto' },
-                                    verticalAlign: VerticalAlign.CENTER,
-                                    width: { size: Math.floor(100 / identity.colorPalette.length), type: WidthType.PERCENTAGE },
-                                    borders: {
-                                        top: { style: BorderStyle.SINGLE, size: 8, color: 'DDDDDD' },
-                                        bottom: { style: BorderStyle.SINGLE, size: 8, color: 'DDDDDD' },
-                                        left: { style: BorderStyle.SINGLE, size: 8, color: 'DDDDDD' },
-                                        right: { style: BorderStyle.SINGLE, size: 8, color: 'DDDDDD' },
-                                    },
-                                })),
+                                children: identity.colorPalette.map(color => {
+                                    const textColor = getContrastColor(color.hex);
+                                    const lightColorBorder = needsBorder(color.hex) ? {
+                                        top: { style: BorderStyle.SINGLE, size: 8, color: 'E0E0E0' },
+                                        bottom: { style: BorderStyle.SINGLE, size: 8, color: 'E0E0E0' },
+                                        left: { style: BorderStyle.SINGLE, size: 8, color: 'E0E0E0' },
+                                        right: { style: BorderStyle.SINGLE, size: 8, color: 'E0E0E0' },
+                                    } : undefined;
+                                    return new TableCell({
+                                        children: [
+                                            new Paragraph({ children: [], spacing: { after: 300 } }),
+                                            new Paragraph({
+                                                children: [new TextRun({
+                                                    text: color.hex,
+                                                    bold: true,
+                                                    size: 18,
+                                                    font: 'Arial',
+                                                    color: textColor.replace('#', ''),
+                                                })],
+                                                alignment: AlignmentType.CENTER,
+                                            }),
+                                            new Paragraph({
+                                                children: [new TextRun({
+                                                    text: color.name,
+                                                    size: 16,
+                                                    color: textColor.replace('#', ''),
+                                                    font: isRtl ? 'Arial' : bodyFont,
+                                                })],
+                                                alignment: AlignmentType.CENTER,
+                                                bidirectional: isRtl,
+                                            }),
+                                            new Paragraph({ children: [], spacing: { after: 300 } }),
+                                        ],
+                                        shading: { fill: color.hex.replace('#', ''), type: ShadingType.SOLID, color: 'auto' },
+                                        verticalAlign: VerticalAlign.CENTER,
+                                        width: { size: Math.floor(100 / identity.colorPalette.length), type: WidthType.PERCENTAGE },
+                                        borders: lightColorBorder,
+                                    });
+                                }),
                             }),
                         ],
                     }),
+                    // Typography Section
                     new Paragraph({
                         children: [
                             new TextRun({
-                                text: "Typography",
-                                font: headerFont,
-                                size: 40,
-                                bold: true,
+                                text: getText('docTypography'),
+                                size: 26,
                                 color: primary.replace('#', ''),
-                                bidi,
+                                font: isRtl ? 'Arial' : headerFont,
+                                italics: true,
                             }),
                         ],
-                        border: { bottom: { style: BorderStyle.SINGLE, size: 16, color: primary.replace('#', '') } },
-                        spacing: { before: 700, after: 200 },
+                        border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: primary.replace('#', '') } },
+                        spacing: { before: 350, after: 200 },
+                        bidirectional: isRtl,
+                    }),
+                    // Header font name
+                    new Paragraph({
+                        children: [new TextRun({
+                            text: headerFont,
+                            size: 36,
+                            color: primary.replace('#', ''),
+                            font: headerFont,
+                        })],
+                        spacing: { after: 60 },
                     }),
                     new Paragraph({
-                        children: [new TextRun({ text: "Header Font", size: 20, color: secondary.replace('#', ''), bidi })],
-                        spacing: { after: 120 },
+                        children: [new TextRun({
+                            text: isRtl ? 'أبجد هوز حطي كلمن' : 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+                            size: 20,
+                            font: isRtl ? 'Arial' : headerFont,
+                        })],
+                        spacing: { after: 250 },
+                        bidirectional: isRtl,
+                    }),
+                    // Body font name
+                    new Paragraph({
+                        children: [new TextRun({
+                            text: bodyFont,
+                            size: 36,
+                            color: primary.replace('#', ''),
+                            font: bodyFont,
+                        })],
+                        spacing: { after: 60 },
                     }),
                     new Paragraph({
-                        children: [new TextRun({ text: headerFont, font: headerFont, size: 48, color: primary.replace('#', ''), bidi })],
-                        spacing: { after: 120 },
-                    }),
-                    new Paragraph({
-                        children: [new TextRun({ text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", font: headerFont, size: 28, bidi })],
-                        spacing: { after: 120 },
-                    }),
-                    new Paragraph({
-                        children: [new TextRun({ text: "abcdefghijklmnopqrstuvwxyz", font: headerFont, size: 28, bidi })],
-                        spacing: { after: 400 },
-                    }),
-                    new Paragraph({
-                        children: [new TextRun({ text: "Body Font", size: 20, color: secondary.replace('#', ''), bidi })],
-                        spacing: { after: 120 },
-                    }),
-                    new Paragraph({
-                        children: [new TextRun({ text: bodyFont, font: bodyFont, size: 48, color: primary.replace('#', ''), bidi })],
-                        spacing: { after: 120 },
-                    }),
-                    new Paragraph({
-                        children: [new TextRun({ text: "ABCDEFGHIJKLMNOPQRSTUVWXYZ", font: bodyFont, size: 28, bidi })],
-                        spacing: { after: 120 },
-                    }),
-                    new Paragraph({
-                        children: [new TextRun({ text: "abcdefghijklmnopqrstuvwxyz", font: bodyFont, size: 28, bidi })],
+                        children: [new TextRun({
+                            text: isRtl ? 'أبجد هوز حطي كلمن' : 'abcdefghijklmnopqrstuvwxyz',
+                            size: 20,
+                            font: isRtl ? 'Arial' : bodyFont,
+                        })],
+                        border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: primary.replace('#', '') } },
+                        spacing: { after: 80 },
+                        bidirectional: isRtl,
                     }),
                 ],
             }],
@@ -264,87 +359,198 @@ const DocumentTemplates: React.FC<DocumentTemplatesProps> = ({ identity, lang })
     };
 
     // --- Export Functions ---
-
     const handlePrint = () => {
         window.print();
     };
 
     const handleExportDocx = async () => {
+        setIsExporting('docx');
         try {
             const doc = await createDoc();
             const blob = await Packer.toBlob(doc);
             saveAs(blob, `${companyName}-Brand-Document.docx`);
         } catch (error) {
             console.error(error);
-            alert("Export failed.");
+            alert("Export failed. Please try again.");
+        } finally {
+            setIsExporting(null);
         }
     };
 
     const handleExportPptx = async () => {
+        setIsExporting('pptx');
         const pptx = new PptxGenJS();
         pptx.layout = 'LAYOUT_16x9';
         pptx.rtlMode = isRtl;
 
         let logoBase64: string;
         try {
-            const res = await fetch(logoUrl);
-            const blob = await res.blob();
-            const reader = new FileReader();
-            reader.readAsDataURL(blob);
-            await new Promise((resolve) => { reader.onloadend = resolve; });
-            logoBase64 = reader.result as string;
+            if (logoUrl.startsWith('data:')) {
+                logoBase64 = logoUrl;
+            } else {
+                const res = await fetch(logoUrl);
+                const blob = await res.blob();
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                await new Promise((resolve) => { reader.onloadend = resolve; });
+                logoBase64 = reader.result as string;
+            }
         } catch (error) {
             console.error("Error fetching logo for PPTX:", error);
             alert("Failed to load logo.");
+            setIsExporting(null);
             return;
         }
 
-        pptx.defineSlideMaster({
-            title: 'MASTER_SLIDE',
-            background: { color: 'FFFFFF' },
-            objects: [
-                { image: { x: isRtl ? '5%' : '90%', y: '5%', w: 1.5, h: 0.75, data: logoBase64 } },
-                { rect: { x: 0, y: '95%', w: '100%', h: 0.4, fill: primary } },
-            ],
-            slideNumber: { x: isRtl ? '5%' : '95%', y: '96%', color: 'FFFFFF', fontSize: 10 },
+        const fontToUse = isRtl ? 'Arial' : headerFont;
+        const bodyFontToUse = isRtl ? 'Arial' : bodyFont;
+
+        // Helper to get logo x position based on controls
+        const getLogoX = (logoWidth: number = 1.2): number => {
+            if (logoPosition.horizontal === 'center') {
+                return (10 - logoWidth) / 2; // Center of 10" slide
+            } else if (logoPosition.horizontal === 'left') {
+                return isRtl ? (10 - logoWidth - 0.3) : 0.3;
+            } else {
+                return isRtl ? 0.3 : (10 - logoWidth - 0.3);
+            }
+        };
+
+        // Helper to get logo y position based on controls
+        const getLogoY = (): number => {
+            return logoPosition.vertical === 'header' ? 0.3 : 4.3; // Top or above footer bar
+        };
+
+        // Check if we're in centered mode (logo centered at header)
+        const isCenteredHeader = logoPosition.horizontal === 'center' && logoPosition.vertical === 'header';
+        // Content starts lower when logo is centered at top (logo ends at ~1.1", add small gap)
+        const contentStartY = isCenteredHeader ? 1.25 : 0.5;
+
+        // Title slide with logo (no filter)
+        const slide1 = pptx.addSlide();
+        slide1.background = { color: primary.replace('#', '') };
+        if (logoBase64) {
+            slide1.addImage({ data: logoBase64, x: 4, y: 0.8, w: 2, h: 2 }); // Title slide always centered
+        }
+        slide1.addText(companyName, {
+            x: 0.5, y: 3, w: 9, h: 1,
+            fontSize: 48, color: 'FFFFFF', bold: true, align: 'center',
+            fontFace: fontToUse,
+            rtlMode: isRtl,
+        });
+        slide1.addText(identity.logo.style || '', {
+            x: 0.5, y: 4, w: 9, h: 0.5,
+            fontSize: 20, color: 'EEEEEE', align: 'center',
+            fontFace: bodyFontToUse,
+            rtlMode: isRtl,
         });
 
-        const slide1 = pptx.addSlide();
-        slide1.background = { color: primary };
-        slide1.addText(companyName, { x: 1, y: 2.5, w: '80%', fontSize: 60, color: 'FFFFFF', bold: true, align: 'center', fontFace: headerFont });
-        slide1.addText(identity.logo.style || 'Brand Identity', { x: 1, y: 4, w: '80%', fontSize: 24, color: 'EEEEEE', align: 'center', fontFace: bodyFont });
-        if (logoUrl) {
-            slide1.addImage({ data: logoBase64, x: '42%', y: 0.5, w: 2, h: 2 });
+        // Logo size for slides 2-4 (smaller than title slide)
+        const logoSize = 0.8;
+
+        // Mission slide with logo position controlled
+        const slide2 = pptx.addSlide();
+        if (logoBase64) {
+            slide2.addImage({ data: logoBase64, x: getLogoX(logoSize), y: getLogoY(), w: logoSize, h: logoSize });
         }
+        slide2.addText(getText('docOurMission'), {
+            x: 0, y: contentStartY, w: 10, h: 0.8,
+            fontSize: 26, color: primary.replace('#', ''), bold: true, align: 'center',
+            fontFace: fontToUse,
+            rtlMode: isRtl,
+        });
+        slide2.addText(identity.logo.prompt || '', {
+            x: 0.5, y: contentStartY + 1.0, w: 9, h: 2.5,
+            fontSize: 16, color: text.replace('#', ''), align: 'center',
+            fontFace: bodyFontToUse,
+            rtlMode: isRtl,
+        });
+        // Footer bar at very bottom of slide (16:9 slide height is 5.625")
+        slide2.addShape(pptx.ShapeType.rect, { x: 0, y: 5.33, w: 10, h: 0.3, fill: { color: primary.replace('#', '') } });
 
-        const slide2 = pptx.addSlide({ masterName: 'MASTER_SLIDE' });
-        slide2.addText('Our Mission', { x: 0.5, y: 0.5, fontSize: 36, color: primary, bold: true, fontFace: headerFont });
-        slide2.addText(identity.logo.prompt, { x: 1, y: 2, w: '80%', fontSize: 24, color: text, fontFace: bodyFont });
-
-        const slide3 = pptx.addSlide({ masterName: 'MASTER_SLIDE' });
-        slide3.addText('Brand Colors', { x: 0.5, y: 0.5, fontSize: 36, color: primary, bold: true, fontFace: headerFont });
+        // Colors slide with logo position controlled
+        const slide3 = pptx.addSlide();
+        if (logoBase64) {
+            slide3.addImage({ data: logoBase64, x: getLogoX(logoSize), y: getLogoY(), w: logoSize, h: logoSize });
+        }
+        slide3.addText(getText('docBrandColors'), {
+            x: 0, y: contentStartY, w: 10, h: 0.8,
+            fontSize: 26, color: primary.replace('#', ''), bold: true, align: 'center',
+            fontFace: fontToUse,
+            rtlMode: isRtl,
+        });
+        // Calculate centered positions for color boxes
+        const colorCount = identity.colorPalette.length;
+        const boxWidth = 1.4;
+        const boxGap = 0.25;
+        const totalColorsWidth = (colorCount * boxWidth) + ((colorCount - 1) * boxGap);
+        const colorsStartX = (10 - totalColorsWidth) / 2;
+        const colorsY = contentStartY + 0.9;
 
         identity.colorPalette.forEach((color, index) => {
-            const xPos = 1 + (index * 2.5);
-            slide3.addShape(pptx.ShapeType.rect, { x: xPos, y: 2, w: 2, h: 2, fill: color.hex });
-            slide3.addText(color.hex, { x: xPos, y: 4.2, w: 2, fontSize: 14, align: 'center', fontFace: bodyFont });
-            slide3.addText(color.name, { x: xPos, y: 4.5, w: 2, fontSize: 12, align: 'center', color: secondary, fontFace: bodyFont });
+            const xPos = colorsStartX + (index * (boxWidth + boxGap));
+            slide3.addShape(pptx.ShapeType.rect, {
+                x: xPos, y: colorsY, w: boxWidth, h: boxWidth,
+                fill: { color: color.hex.replace('#', '') },
+                line: needsBorder(color.hex) ? { color: 'CCCCCC', width: 1 } : { color: 'FFFFFF', width: 0 },
+            });
+            // Hex code right below box
+            slide3.addText(color.hex, { x: xPos, y: colorsY + boxWidth + 0.1, w: boxWidth, fontSize: 11, align: 'center', fontFace: 'Arial', bold: true });
+            // Color name below hex
+            slide3.addText(color.name, { x: xPos, y: colorsY + boxWidth + 0.35, w: boxWidth, fontSize: 9, align: 'center', color: secondary.replace('#', ''), fontFace: bodyFontToUse, rtlMode: isRtl });
         });
+        // Footer bar at very bottom of slide
+        slide3.addShape(pptx.ShapeType.rect, { x: 0, y: 5.33, w: 10, h: 0.3, fill: { color: primary.replace('#', '') } });
 
-        const slide4 = pptx.addSlide({ masterName: 'MASTER_SLIDE' });
-        slide4.addText('Typography', { x: 0.5, y: 0.5, fontSize: 36, color: primary, bold: true, fontFace: headerFont });
-        slide4.addText('Header Font: ' + headerFont, { x: 1, y: 2, fontSize: 32, color: text, fontFace: headerFont, bold: true });
-        slide4.addText('Body Font: ' + bodyFont, { x: 1, y: 3, fontSize: 24, color: text, fontFace: bodyFont });
-        slide4.addText('The quick brown fox jumps over the lazy dog.', { x: 1, y: 4, fontSize: 18, color: secondary, fontFace: bodyFont });
+        // Typography slide with logo position controlled
+        const slide4 = pptx.addSlide();
+        if (logoBase64) {
+            slide4.addImage({ data: logoBase64, x: getLogoX(logoSize), y: getLogoY(), w: logoSize, h: logoSize });
+        }
+        slide4.addText(getText('docTypography'), {
+            x: 0, y: contentStartY, w: 10, h: 0.8,
+            fontSize: 26, color: primary.replace('#', ''), bold: true, align: 'center',
+            fontFace: fontToUse,
+            rtlMode: isRtl,
+        });
+        // Styled box for header font (with left border effect using thin rectangle)
+        const typoBoxY1 = contentStartY + 0.9;
+        slide4.addShape(pptx.ShapeType.rect, { x: 1, y: typoBoxY1, w: 8, h: 0.7, fill: { color: primary.replace('#', ''), transparency: 95 } });
+        slide4.addShape(pptx.ShapeType.rect, { x: 1, y: typoBoxY1, w: 0.06, h: 0.7, fill: { color: primary.replace('#', '') } });
+        slide4.addText(`${getText('docHeaderFont')}: ${headerFont}`, {
+            x: 1.2, y: typoBoxY1, w: 7.6, h: 0.7,
+            fontSize: 20, color: text.replace('#', ''), fontFace: fontToUse, bold: true, align: 'center',
+            valign: 'middle',
+            rtlMode: isRtl,
+        });
+        // Styled box for body font
+        const typoBoxY2 = typoBoxY1 + 0.9;
+        slide4.addShape(pptx.ShapeType.rect, { x: 1, y: typoBoxY2, w: 8, h: 0.7, fill: { color: secondary.replace('#', ''), transparency: 95 } });
+        slide4.addShape(pptx.ShapeType.rect, { x: 1, y: typoBoxY2, w: 0.06, h: 0.7, fill: { color: secondary.replace('#', '') } });
+        slide4.addText(`${getText('docBodyFont')}: ${bodyFont}`, {
+            x: 1.2, y: typoBoxY2, w: 7.6, h: 0.7,
+            fontSize: 16, color: text.replace('#', ''), fontFace: bodyFontToUse, align: 'center',
+            valign: 'middle',
+            rtlMode: isRtl,
+        });
+        // Sample text
+        slide4.addText(getText('docQuickFox'), {
+            x: 0, y: typoBoxY2 + 0.9, w: 10, h: 0.6,
+            fontSize: 14, color: secondary.replace('#', ''), fontFace: bodyFontToUse, italic: true, align: 'center',
+            rtlMode: isRtl,
+        });
+        // Footer bar at very bottom of slide
+        slide4.addShape(pptx.ShapeType.rect, { x: 0, y: 5.33, w: 10, h: 0.3, fill: { color: primary.replace('#', '') } });
 
         const pptxBlob = await pptx.write({ outputType: 'blob' }) as Blob;
-        saveAs(pptxBlob as Blob, `${companyName}-Presentation.pptx`);
+        saveAs(pptxBlob, `${companyName}-Presentation.pptx`);
+        setIsExporting(null);
     };
 
     const handleDownloadBundle = async () => {
+        setIsExporting('bundle');
         const zip = new JSZip();
 
-        // Add DOCX
         try {
             const doc = await createDoc();
             const docBlob = await Packer.toBlob(doc);
@@ -353,544 +559,858 @@ const DocumentTemplates: React.FC<DocumentTemplatesProps> = ({ identity, lang })
             console.error('DOCX generation failed:', error);
         }
 
-        // Add PPTX
-        const pptx = new PptxGenJS();
-        pptx.layout = 'LAYOUT_16x9';
-        pptx.rtlMode = isRtl;
-
-        let logoBase64: string = '';
-        if (logoUrl) {
-            try {
-                const res = await fetch(logoUrl);
-                const blob = await res.blob();
-                const reader = new FileReader();
-                reader.readAsDataURL(blob);
-                await new Promise((resolve) => { reader.onloadend = resolve; });
-                logoBase64 = reader.result as string;
-            } catch { }
-        }
-
-        pptx.defineSlideMaster({
-            title: 'MASTER_SLIDE',
-            background: { color: 'FFFFFF' },
-            objects: [
-                { image: { x: isRtl ? '5%' : '90%', y: '5%', w: 1.5, h: 0.75, data: logoBase64 } },
-                { rect: { x: 0, y: '95%', w: '100%', h: 0.4, fill: primary } },
-            ],
-            slideNumber: { x: isRtl ? '5%' : '95%', y: '96%', color: 'FFFFFF', fontSize: 10 },
-        });
-
-        const slide1 = pptx.addSlide();
-        slide1.background = { color: primary };
-        slide1.addText(companyName, { x: 1, y: 2.5, w: '80%', fontSize: 60, color: 'FFFFFF', bold: true, align: 'center', fontFace: headerFont });
-        slide1.addText(identity.logo.style || 'Brand Identity', { x: 1, y: 4, w: '80%', fontSize: 24, color: 'EEEEEE', align: 'center', fontFace: bodyFont });
-        if (logoBase64) {
-            slide1.addImage({ data: logoBase64, x: '42%', y: 0.5, w: 2, h: 2 });
-        }
-
-        const slide2 = pptx.addSlide({ masterName: 'MASTER_SLIDE' });
-        slide2.addText('Our Mission', { x: 0.5, y: 0.5, fontSize: 36, color: primary, bold: true, fontFace: headerFont });
-        slide2.addText(identity.logo.prompt, { x: 1, y: 2, w: '80%', fontSize: 24, color: text, fontFace: bodyFont });
-
-        const slide3 = pptx.addSlide({ masterName: 'MASTER_SLIDE' });
-        slide3.addText('Brand Colors', { x: 0.5, y: 0.5, fontSize: 36, color: primary, bold: true, fontFace: headerFont });
-
-        identity.colorPalette.forEach((color, index) => {
-            const xPos = 1 + (index * 2.5);
-            slide3.addShape(pptx.ShapeType.rect, { x: xPos, y: 2, w: 2, h: 2, fill: color.hex });
-            slide3.addText(color.hex, { x: xPos, y: 4.2, w: 2, fontSize: 14, align: 'center', fontFace: bodyFont });
-            slide3.addText(color.name, { x: xPos, y: 4.5, w: 2, fontSize: 12, align: 'center', color: secondary, fontFace: bodyFont });
-        });
-
-        const slide4 = pptx.addSlide({ masterName: 'MASTER_SLIDE' });
-        slide4.addText('Typography', { x: 0.5, y: 0.5, fontSize: 36, color: primary, bold: true, fontFace: headerFont });
-        slide4.addText('Header Font: ' + headerFont, { x: 1, y: 2, fontSize: 32, color: text, fontFace: headerFont, bold: true });
-        slide4.addText('Body Font: ' + bodyFont, { x: 1, y: 3, fontSize: 24, color: text, fontFace: bodyFont });
-        slide4.addText('The quick brown fox jumps over the lazy dog.', { x: 1, y: 4, fontSize: 18, color: secondary, fontFace: bodyFont });
-
-        const pptxBlob = await pptx.write({ outputType: 'blob' }) as Blob;
-        zip.file(`${companyName}-Presentation.pptx`, pptxBlob);
-
-        // Add fonts
         const fontsFolder = zip.folder('fonts');
-        const fontInfo = [
-            { name: headerFont, slug: headerFont.toLowerCase().replace(/\s/g, ''), weights: ['Regular', 'Bold'] },
-            { name: bodyFont, slug: bodyFont.toLowerCase().replace(/\s/g, ''), weights: ['Regular', 'Bold'] },
-        ];
+        const fontNames = [headerFont, bodyFont];
+        const weights: ('Regular' | 'Bold')[] = ['Regular', 'Bold'];
 
-        for (const font of fontInfo) {
-            for (const weight of font.weights) {
-                let filename = `${font.name.replace(/\s/g, '')}-${weight}.ttf`;
-                let url = `https://raw.githubusercontent.com/google/fonts/main/ofl/${font.slug}/${filename}`;
-
+        for (const fontName of fontNames) {
+            for (const weight of weights) {
+                const filename = `${fontName.replace(/\s/g, '')}-${weight}.ttf`;
                 try {
-                    let res = await fetch(url);
-                    if (!res.ok) {
-                        // Try static folder
-                        filename = `static/${filename}`;
-                        url = `https://raw.githubusercontent.com/google/fonts/main/ofl/${font.slug}/${filename}`;
-                        res = await fetch(url);
-                    }
-                    if (res.ok) {
-                        const buffer = await res.arrayBuffer();
-                        fontsFolder.file(filename, buffer);
-                    } else {
-                        console.warn(`Font file not found: ${url}`);
+                    const buffer = await fetchFontBuffer(fontName, weight);
+                    if (buffer) {
+                        fontsFolder!.file(filename, buffer);
                     }
                 } catch (error) {
-                    console.error(`Error downloading font ${filename}:`, error);
-                }
-
-                // Also try variable if static not found
-                if (weight === 'Regular') {
-                    filename = `${font.name.replace(/\s/g, '')}-VariableFont_wght.ttf`; // Example for variable
-                    url = `https://raw.githubusercontent.com/google/fonts/main/ofl/${font.slug}/${filename}`;
-                    try {
-                        const res = await fetch(url);
-                        if (res.ok) {
-                            const buffer = await res.arrayBuffer();
-                            fontsFolder.file(filename, buffer);
-                        }
-                    } catch { }
+                    console.error(`Error fetching font ${filename}:`, error);
                 }
             }
         }
 
-        // Add brand.css
-        const cssContent = `
-/* Brand CSS for ${companyName} */
-/* To use: Link this CSS and install the fonts from the fonts folder */
-
-@font-face {
-    font-family: '${headerFont}';
-    src: url('./fonts/${headerFont.replace(/\s/g, '')}-Regular.ttf') format('truetype');
-    font-weight: normal;
-    font-style: normal;
-}
-
-@font-face {
-    font-family: '${headerFont}';
-    src: url('./fonts/${headerFont.replace(/\s/g, '')}-Bold.ttf') format('truetype');
-    font-weight: bold;
-    font-style: normal;
-}
-
-@font-face {
-    font-family: '${bodyFont}';
-    src: url('./fonts/${bodyFont.replace(/\s/g, '')}-Regular.ttf') format('truetype');
-    font-weight: normal;
-    font-style: normal;
-}
-
-@font-face {
-    font-family: '${bodyFont}';
-    src: url('./fonts/${bodyFont.replace(/\s/g, '')}-Bold.ttf') format('truetype');
-    font-weight: bold;
-    font-style: normal;
-}
-
+        const cssContent = `/* Brand CSS for ${companyName} */
 :root {
     --brand-primary: ${primary};
     --brand-secondary: ${secondary};
-    --brand-text: ${text};
+    --brand-accent: ${accent};
 }
 
 body {
     font-family: '${bodyFont}', sans-serif;
-    color: var(--brand-text);
-    line-height: 1.6;
+    color: #1a1a1a;
 }
 
 h1, h2, h3 {
     font-family: '${headerFont}', serif;
     color: var(--brand-primary);
-}
-
-.brand-header {
-    border-bottom: 4px solid var(--brand-primary);
-}
-
-/* Add more styles as needed from your preview */
-`;
+}`;
         zip.file('brand.css', cssContent);
 
-        // Add README.txt
-        const readmeContent = `
-Brand Identity Bundle for ${companyName}
-
-Thank you for using the AI Brand Identity Generator!
-
-This ZIP contains:
-- ${companyName}-Brand-Document.docx: Your brand guidelines document. Open in Microsoft Word.
-- ${companyName}-Presentation.pptx: Your brand presentation slides. Open in Microsoft PowerPoint.
-- fonts/ folder: Contains the TTF font files for ${headerFont} and ${bodyFont}.
-- brand.css: A CSS file with brand styles, fonts, and colors. Use this for web projects.
-
-To ensure everything looks exactly like the web preview:
-1. Install the fonts:
-   - On Windows: Right-click each .ttf file > Install.
-   - On Mac: Double-click each .ttf file > Install Font.
-   - On Linux: Copy to ~/.fonts and refresh cache.
-2. Open the DOCX and PPTX files. They reference the font names, so with fonts installed, they'll match perfectly.
-3. For web use: Link brand.css in your HTML, and the styles will apply (assuming fonts are installed or loaded).
-
-If some fonts are missing, they may be variable fonts—use the VariableFont file if available.
-
-Generated on: ${new Date().toLocaleDateString()}
-
-For questions, contact support.
-`;
-        zip.file('README.txt', readmeContent);
-
-        // Generate and download ZIP
-        try {
-            const zipBlob = await zip.generateAsync({ type: 'blob' });
-            saveAs(zipBlob, `${companyName}-Brand-Bundle.zip`);
-        } catch (error) {
-            console.error('ZIP generation failed:', error);
-            alert("Bundle download failed.");
-        }
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        saveAs(zipBlob, `${companyName}-Brand-Bundle.zip`);
+        setIsExporting(null);
     };
 
     return (
-        <div className="mt-16 bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-200" id="documents-section">
+        <div className="doc-templates-root" id="documents-section">
             <link href={headerFontUrl} rel="stylesheet" />
             <link href={bodyFontUrl} rel="stylesheet" />
+            <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
 
-            <div className="bg-gray-50 border-b border-gray-200 p-4 flex flex-col sm:flex-row justify-between items-center gap-4">
-                <div>
-                    <h2 className="text-2xl font-bold text-gray-800">Documents Template</h2>
-                    <p className="text-gray-500 text-sm">Preview and export your brand assets</p>
+            <style>{`
+                .doc-templates-root {
+                    --primary: ${primary};
+                    --secondary: ${secondary};
+                    --accent: ${accent};
+                    margin-top: 3rem;
+                }
+
+                .doc-container {
+                    background: #ffffff;
+                    border-radius: 20px;
+                    overflow: hidden;
+                    border: 1px solid #e5e7eb;
+                    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+                }
+
+                .doc-header {
+                    padding: 1.75rem 2rem;
+                    background: linear-gradient(135deg, #fafbfc 0%, #f3f4f6 100%);
+                    border-bottom: 1px solid #e5e7eb;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    gap: 1.5rem;
+                    flex-wrap: wrap;
+                }
+
+                .doc-header-content h2 {
+                    font-family: 'Outfit', sans-serif;
+                    font-size: 1.5rem;
+                    font-weight: 700;
+                    color: #111827;
+                    margin: 0 0 0.25rem;
+                }
+
+                .doc-header-content p {
+                    font-family: 'Outfit', sans-serif;
+                    font-size: 0.875rem;
+                    color: #6b7280;
+                    margin: 0;
+                }
+
+                .doc-tabs {
+                    display: flex;
+                    background: #ffffff;
+                    border-radius: 12px;
+                    padding: 4px;
+                    gap: 4px;
+                    border: 1px solid #e5e7eb;
+                }
+
+                .doc-tab {
+                    padding: 0.625rem 1.25rem;
+                    font-family: 'Outfit', sans-serif;
+                    font-size: 0.875rem;
+                    font-weight: 500;
+                    color: #6b7280;
+                    background: transparent;
+                    border: none;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                    display: flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                }
+
+                .doc-tab:hover:not(.active) {
+                    color: #374151;
+                    background: #f9fafb;
+                }
+
+                .doc-tab.active {
+                    color: #ffffff;
+                    background: var(--primary);
+                }
+
+                .doc-tab svg {
+                    width: 16px;
+                    height: 16px;
+                }
+
+                .doc-toolbar {
+                    padding: 1rem 2rem;
+                    background: #ffffff;
+                    border-bottom: 1px solid #f3f4f6;
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    gap: 1rem;
+                    flex-wrap: wrap;
+                }
+
+                .doc-controls {
+                    display: flex;
+                    gap: 1.5rem;
+                    align-items: center;
+                    flex-wrap: wrap;
+                }
+
+                .doc-control-group {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.625rem;
+                }
+
+                .doc-control-label {
+                    font-family: 'Outfit', sans-serif;
+                    font-size: 0.75rem;
+                    font-weight: 600;
+                    color: #9ca3af;
+                    text-transform: uppercase;
+                }
+
+                .doc-control-buttons {
+                    display: flex;
+                    background: #f9fafb;
+                    border-radius: 8px;
+                    padding: 3px;
+                    gap: 2px;
+                    border: 1px solid #e5e7eb;
+                }
+
+                .doc-control-btn {
+                    padding: 0.375rem 0.75rem;
+                    font-family: 'Outfit', sans-serif;
+                    font-size: 0.75rem;
+                    font-weight: 500;
+                    color: #6b7280;
+                    background: transparent;
+                    border: none;
+                    border-radius: 6px;
+                    cursor: pointer;
+                    transition: all 0.15s ease;
+                }
+
+                .doc-control-btn:hover:not(.active) {
+                    color: #374151;
+                }
+
+                .doc-control-btn.active {
+                    color: #ffffff;
+                    background: var(--primary);
+                }
+
+                .doc-export-buttons {
+                    display: flex;
+                    gap: 0.5rem;
+                    flex-wrap: wrap;
+                }
+
+                .doc-export-btn {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.375rem;
+                    padding: 0.625rem 1rem;
+                    font-family: 'Outfit', sans-serif;
+                    font-size: 0.8125rem;
+                    font-weight: 600;
+                    border: none;
+                    border-radius: 10px;
+                    cursor: pointer;
+                    transition: all 0.2s ease;
+                }
+
+                .doc-export-btn:active {
+                    transform: scale(0.97);
+                }
+
+                .doc-export-btn.pdf {
+                    background: #f3f4f6;
+                    color: #374151;
+                    border: 1px solid #e5e7eb;
+                }
+
+                .doc-export-btn.pdf:hover {
+                    background: #e5e7eb;
+                }
+
+                .doc-export-btn.docx {
+                    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+                    color: white;
+                }
+
+                .doc-export-btn.pptx {
+                    background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+                    color: white;
+                }
+
+                .doc-export-btn.bundle {
+                    background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+                    color: white;
+                }
+
+                .doc-export-btn.loading {
+                    opacity: 0.7;
+                    pointer-events: none;
+                }
+
+                .doc-export-btn svg {
+                    width: 15px;
+                    height: 15px;
+                }
+
+                @keyframes spin {
+                    to { transform: rotate(360deg); }
+                }
+
+                .doc-export-btn.loading svg {
+                    animation: spin 0.8s linear infinite;
+                }
+
+                .doc-preview-area {
+                    padding: 2.5rem;
+                    background: linear-gradient(180deg, #f9fafb 0%, #f3f4f6 100%);
+                    min-height: 400px;
+                    display: flex;
+                    justify-content: center;
+                    overflow-x: auto;
+                }
+
+                .doc-preview {
+                    background: white;
+                    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+                }
+
+                .slides-container {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2rem;
+                }
+
+                .slide-wrapper {
+                    position: relative;
+                }
+
+                .slide-label {
+                    position: absolute;
+                    top: -1.5rem;
+                    ${isRtl ? 'right' : 'left'}: 0;
+                    font-family: 'Outfit', sans-serif;
+                    font-size: 0.75rem;
+                    font-weight: 600;
+                    color: #9ca3af;
+                    display: flex;
+                    align-items: center;
+                    gap: 0.5rem;
+                }
+
+                .slide-label-number {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    width: 20px;
+                    height: 20px;
+                    background: #f3f4f6;
+                    border-radius: 6px;
+                    font-size: 0.6875rem;
+                    font-weight: 700;
+                    color: #6b7280;
+                }
+
+                .slide-preview {
+                    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+                    border-radius: 8px;
+                    overflow: hidden;
+                }
+
+                /* Print styles - ONLY document page, clean white background */
+                @media print {
+                    * {
+                        -webkit-print-color-adjust: exact !important;
+                        print-color-adjust: exact !important;
+                    }
+
+                    /* Hide everything first */
+                    html, body {
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        background: white !important;
+                    }
+
+                    body > *:not(.doc-templates-root),
+                    body > *:not(.doc-templates-root) * {
+                        display: none !important;
+                        visibility: hidden !important;
+                    }
+
+                    /* Hide all container elements */
+                    .doc-container {
+                        all: unset !important;
+                        display: block !important;
+                    }
+
+                    .doc-header,
+                    .doc-tabs,
+                    .doc-toolbar,
+                    .doc-controls,
+                    .doc-export-buttons,
+                    .slides-container,
+                    .slide-wrapper,
+                    .slide-label,
+                    .slide-preview {
+                        display: none !important;
+                    }
+
+                    .doc-preview-area {
+                        all: unset !important;
+                        display: block !important;
+                        padding: 0 !important;
+                        margin: 0 !important;
+                        background: white !important;
+                    }
+
+                    .doc-templates-root {
+                        all: unset !important;
+                        display: block !important;
+                    }
+
+                    /* Show only the document preview */
+                    .doc-preview {
+                        display: block !important;
+                        visibility: visible !important;
+                        position: relative !important;
+                        width: 100% !important;
+                        max-width: none !important;
+                        min-height: auto !important;
+                        box-shadow: none !important;
+                        margin: 0 !important;
+                        padding: 15mm !important;
+                        background: white !important;
+                        box-sizing: border-box !important;
+                    }
+
+                    .doc-preview * {
+                        visibility: visible !important;
+                    }
+                }
+            `}</style>
+
+            <div className="doc-container">
+                {/* Header */}
+                <div className="doc-header">
+                    <div className="doc-header-content">
+                        <h2>{getText('docBrandDocuments')}</h2>
+                        <p>{getText('docSubtitle')}</p>
+                    </div>
+
+                    <div className="doc-tabs">
+                        <button
+                            onClick={() => setActiveTab('document')}
+                            className={`doc-tab ${activeTab === 'document' ? 'active' : ''}`}
+                        >
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                            {getText('docTabDocument')}
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('presentation')}
+                            className={`doc-tab ${activeTab === 'presentation' ? 'active' : ''}`}
+                        >
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                            </svg>
+                            {getText('docTabPresentation')}
+                        </button>
+                    </div>
                 </div>
 
-                <div className="flex bg-gray-200 p-1 rounded-lg">
-                    <button
-                        onClick={() => setActiveTab('document')}
-                        className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${activeTab === 'document' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-600 hover:text-gray-800'}`}
-                    >
-                        Document
-                    </button>
-                    <button
-                        onClick={() => setActiveTab('presentation')}
-                        className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${activeTab === 'presentation' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-600 hover:text-gray-800'}`}
-                    >
-                        Presentation
-                    </button>
-                </div>
-            </div>
-
-            {/* Toolbar */}
-            <div className="p-4 border-b border-gray-200 flex flex-col md:flex-row justify-between gap-4 bg-white sticky top-0 z-10">
-                <div className="flex flex-wrap gap-4 items-center">
-                    <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-600">Logo V:</span>
-                        <div className="flex bg-gray-100 rounded-lg p-1">
-                            <button
-                                onClick={() => setLogoPosition(prev => ({ ...prev, vertical: 'header' }))}
-                                className={`px-3 py-1 text-xs font-medium rounded ${logoPosition.vertical === 'header' ? 'bg-white shadow text-indigo-600' : 'text-gray-500'}`}
-                            >
-                                Header
-                            </button>
-                            <button
-                                onClick={() => setLogoPosition(prev => ({ ...prev, vertical: 'footer' }))}
-                                className={`px-3 py-1 text-xs font-medium rounded ${logoPosition.vertical === 'footer' ? 'bg-white shadow text-indigo-600' : 'text-gray-500'}`}
-                            >
-                                Footer
-                            </button>
+                {/* Toolbar */}
+                <div className="doc-toolbar">
+                    <div className="doc-controls">
+                        <div className="doc-control-group">
+                            <span className="doc-control-label">{getText('docPosition')}</span>
+                            <div className="doc-control-buttons">
+                                <button
+                                    onClick={() => setLogoPosition(prev => ({ ...prev, vertical: 'header' }))}
+                                    className={`doc-control-btn ${logoPosition.vertical === 'header' ? 'active' : ''}`}
+                                >
+                                    {getText('docHeader')}
+                                </button>
+                                <button
+                                    onClick={() => setLogoPosition(prev => ({ ...prev, vertical: 'footer' }))}
+                                    className={`doc-control-btn ${logoPosition.vertical === 'footer' ? 'active' : ''}`}
+                                >
+                                    {getText('docFooter')}
+                                </button>
+                            </div>
+                        </div>
+                        <div className="doc-control-group">
+                            <span className="doc-control-label">{getText('docAlign')}</span>
+                            <div className="doc-control-buttons">
+                                <button
+                                    onClick={() => setLogoPosition(prev => ({ ...prev, horizontal: 'left' }))}
+                                    className={`doc-control-btn ${logoPosition.horizontal === 'left' ? 'active' : ''}`}
+                                >
+                                    {getText('docLeft')}
+                                </button>
+                                <button
+                                    onClick={() => setLogoPosition(prev => ({ ...prev, horizontal: 'center' }))}
+                                    className={`doc-control-btn ${logoPosition.horizontal === 'center' ? 'active' : ''}`}
+                                >
+                                    {getText('docCenter')}
+                                </button>
+                                <button
+                                    onClick={() => setLogoPosition(prev => ({ ...prev, horizontal: 'right' }))}
+                                    className={`doc-control-btn ${logoPosition.horizontal === 'right' ? 'active' : ''}`}
+                                >
+                                    {getText('docRight')}
+                                </button>
+                            </div>
                         </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-600">Logo H:</span>
-                        <div className="flex bg-gray-100 rounded-lg p-1">
+
+                    <div className="doc-export-buttons">
+                        <button onClick={handlePrint} className="doc-export-btn pdf">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+                            </svg>
+                            {getText('docExportPDF')}
+                        </button>
+
+                        {activeTab === 'document' ? (
                             <button
-                                onClick={() => setLogoPosition(prev => ({ ...prev, horizontal: 'left' }))}
-                                className={`px-3 py-1 text-xs font-medium rounded ${logoPosition.horizontal === 'left' ? 'bg-white shadow text-indigo-600' : 'text-gray-500'}`}
+                                onClick={handleExportDocx}
+                                className={`doc-export-btn docx ${isExporting === 'docx' ? 'loading' : ''}`}
+                                disabled={isExporting !== null}
                             >
-                                Left
+                                {isExporting === 'docx' ? (
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12a8 8 0 018-8v8H4z" />
+                                    </svg>
+                                ) : (
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                    </svg>
+                                )}
+                                {getText('docExportDOCX')}
                             </button>
+                        ) : (
                             <button
-                                onClick={() => setLogoPosition(prev => ({ ...prev, horizontal: 'center' }))}
-                                className={`px-3 py-1 text-xs font-medium rounded ${logoPosition.horizontal === 'center' ? 'bg-white shadow text-indigo-600' : 'text-gray-500'}`}
+                                onClick={handleExportPptx}
+                                className={`doc-export-btn pptx ${isExporting === 'pptx' ? 'loading' : ''}`}
+                                disabled={isExporting !== null}
                             >
-                                Center
+                                {isExporting === 'pptx' ? (
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12a8 8 0 018-8v8H4z" />
+                                    </svg>
+                                ) : (
+                                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" />
+                                    </svg>
+                                )}
+                                {getText('docExportPPTX')}
                             </button>
-                            <button
-                                onClick={() => setLogoPosition(prev => ({ ...prev, horizontal: 'right' }))}
-                                className={`px-3 py-1 text-xs font-medium rounded ${logoPosition.horizontal === 'right' ? 'bg-white shadow text-indigo-600' : 'text-gray-500'}`}
-                            >
-                                Right
-                            </button>
-                        </div>
+                        )}
+
+                        <button
+                            onClick={handleDownloadBundle}
+                            className={`doc-export-btn bundle ${isExporting === 'bundle' ? 'loading' : ''}`}
+                            disabled={isExporting !== null}
+                        >
+                            {isExporting === 'bundle' ? (
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12a8 8 0 018-8v8H4z" />
+                                </svg>
+                            ) : (
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                            )}
+                            {getText('docExportBundle')}
+                        </button>
                     </div>
                 </div>
 
-                <div className="flex gap-3 ml-auto flex-wrap">
-                    <button
-                        onClick={handlePrint}
-                        className="flex items-center px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium text-sm"
-                    >
-                        <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
-                        Export PDF
-                    </button>
-
-                    {activeTab === 'document' ? (
-                        <button
-                            onClick={handleExportDocx}
-                            className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
+                {/* Preview Area */}
+                <div className="doc-preview-area">
+                    {activeTab === 'document' && (
+                        <div
+                            ref={printRef}
+                            className="doc-preview"
+                            dir={isRtl ? 'rtl' : 'ltr'}
+                            style={{
+                                width: '210mm',
+                                minHeight: '297mm',
+                                padding: '20mm',
+                                boxSizing: 'border-box',
+                                fontFamily: `'${bodyFont}', sans-serif`,
+                                color: text,
+                                display: 'flex',
+                                flexDirection: 'column',
+                            }}
                         >
-                            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                            Export DOCX
-                        </button>
-                    ) : (
-                        <button
-                            onClick={handleExportPptx}
-                            className="flex items-center px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 transition-colors font-medium text-sm"
-                        >
-                            <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
-                            Export PPTX
-                        </button>
-                    )}
-                    <button
-                        onClick={handleDownloadBundle}
-                        className="flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-medium text-sm"
-                    >
-                        <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                        Download Bundle
-                    </button>
-                </div>
-            </div>
-
-            {/* Preview Area */}
-            <div className="p-8 bg-gray-100 flex justify-center overflow-y-auto" style={{ maxHeight: '80vh' }}>
-                {activeTab === 'document' && (
-                    <div
-                        ref={contentRef}
-                        className="bg-white shadow-2xl mx-auto transition-all duration-500 ease-in-out relative"
-                        dir={isRtl ? 'rtl' : 'ltr'}
-                        style={{
-                            width: '210mm',
-                            minHeight: '297mm',
-                            padding: '25mm 20mm',
-                            boxSizing: 'border-box',
-                            fontFamily: `'${bodyFont}', sans-serif`,
-                            color: text,
-                            display: 'flex',
-                            flexDirection: 'column',
-                        }}
-                    >
-                        <div className="brand-header" style={{ borderBottom: `4px solid ${primary}`, marginBottom: '40px', paddingBottom: '25px', textAlign: 'center' }}>
+                            {/* Header with logo */}
                             {logoPosition.vertical === 'header' && logoUrl && (
                                 <div style={{
                                     display: 'flex',
                                     justifyContent: logoPosition.horizontal === 'left' ? 'flex-start' : logoPosition.horizontal === 'right' ? 'flex-end' : 'center',
-                                    marginBottom: '20px',
-                                    width: '100%'
+                                    marginBottom: '15px',
                                 }}>
-                                    <img src={logoUrl} alt="Logo" style={{ height: '90px', objectFit: 'contain' }} />
+                                    <img src={logoUrl} alt="Logo" style={{ height: '65px', objectFit: 'contain' }} />
                                 </div>
                             )}
-                            <h1 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '32pt', margin: '0 0 10px 0', fontWeight: 700 }}>{companyName}</h1>
-                            <div style={{ fontFamily: `'${bodyFont}', sans-serif`, color: secondary, fontSize: '14pt' }}>{identity.logo.style}</div>
-                        </div>
 
-                        <div className="content" style={{ fontSize: '12pt', lineHeight: 1.7, flex: 1 }}>
-                            <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '20pt', borderBottom: `2px solid ${primary}`, paddingBottom: '10px', marginTop: '35px' }}>Brand Overview</h2>
-                            <p>{identity.logo.prompt}</p>
-
-                            <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '20pt', borderBottom: `2px solid ${primary}`, paddingBottom: '10px', marginTop: '35px' }}>Color Palette</h2>
-                            <div style={{
-                                display: 'grid',
-                                gridTemplateColumns: 'repeat(5, 1fr)',
-                                gap: '20px',
-                                pageBreakInside: 'avoid',
-                                marginTop: '20px'
-                            }}>
-                                {identity.colorPalette.map((color, idx) => (
-                                    <div key={idx} style={{
-                                        textAlign: 'center',
-                                        pageBreakInside: 'avoid'
-                                    }}>
-                                        <div style={{
-                                            width: '100%',
-                                            height: '100px',
-                                            backgroundColor: color.hex,
-                                            border: '1px solid #ddd',
-                                            marginBottom: '12px'
-                                        }}></div>
-                                        <div style={{ fontWeight: 'bold', fontSize: '11pt' }}>{color.hex}</div>
-                                        <div style={{ fontSize: '10pt', color: secondary }}>{color.name}</div>
-                                    </div>
-                                ))}
-                            </div>
-
-                            <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '20pt', borderBottom: `2px solid ${primary}`, paddingBottom: '10px', marginTop: '35px' }}>Typography</h2>
-                            <div style={{ marginTop: '20px' }}>
-                                <div style={{ marginBottom: '20px' }}>
-                                    <div style={{ fontSize: '10pt', color: secondary, marginBottom: '5px' }}>Header Font</div>
-                                    <div style={{ fontFamily: `'${headerFont}', serif`, fontSize: '24pt', color: primary }}>{headerFont}</div>
-                                    <div style={{ fontFamily: `'${headerFont}', serif`, fontSize: '14pt' }}>ABCDEFGHIJKLMNOPQRSTUVWXYZ</div>
-                                    <div style={{ fontFamily: `'${headerFont}', serif`, fontSize: '14pt' }}>abcdefghijklmnopqrstuvwxyz</div>
-                                </div>
-                                <div>
-                                    <div style={{ fontSize: '10pt', color: secondary, marginBottom: '5px' }}>Body Font</div>
-                                    <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '24pt', color: primary }}>{bodyFont}</div>
-                                    <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '14pt' }}>ABCDEFGHIJKLMNOPQRSTUVWXYZ</div>
-                                    <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '14pt' }}>abcdefghijklmnopqrstuvwxyz</div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="footer" style={{ marginTop: 'auto', textAlign: 'center', color: secondary, fontSize: '9pt', borderTop: '1px solid #eee', paddingTop: '10px' }}>
-                            {logoPosition.vertical === 'footer' && logoUrl && (
+                            {/* Title */}
+                            <div style={{ textAlign: 'center', marginBottom: '8px' }}>
+                                <h1 style={{
+                                    fontFamily: `'${headerFont}', serif`,
+                                    color: primary,
+                                    fontSize: '26pt',
+                                    margin: '0 0 4px 0',
+                                    fontWeight: 700,
+                                }}>{companyName}</h1>
                                 <div style={{
-                                    display: 'flex',
-                                    justifyContent: logoPosition.horizontal === 'left' ? 'flex-start' : logoPosition.horizontal === 'right' ? 'flex-end' : 'center',
+                                    fontFamily: `'${bodyFont}', sans-serif`,
+                                    color: secondary,
+                                    fontSize: '10pt',
+                                }}>{identity.logo.style}</div>
+                            </div>
+
+                            {/* Divider line */}
+                            <div style={{ borderBottom: `3px solid ${primary}`, marginBottom: '25px' }} />
+
+                            {/* Content */}
+                            <div style={{ fontSize: '10pt', lineHeight: 1.5, flex: 1 }}>
+                                {/* Brand Overview */}
+                                <h2 style={{
+                                    fontFamily: `'${headerFont}', serif`,
+                                    color: primary,
+                                    fontSize: '13pt',
+                                    fontStyle: 'italic',
+                                    fontWeight: 'normal',
+                                    borderBottom: `1px solid ${primary}`,
+                                    paddingBottom: '4px',
+                                    marginTop: '15px',
                                     marginBottom: '10px',
-                                    width: '100%'
                                 }}>
-                                    <img src={logoUrl} alt="Logo" style={{ height: '50px', objectFit: 'contain' }} />
-                                </div>
-                            )}
-                            <span>Confidential • Generated on {new Date().toLocaleDateString()}</span>
-                        </div>
-                    </div>
-                )}
+                                    {getText('docBrandOverview')}
+                                </h2>
+                                <p style={{ margin: '0 0 15px 0', textAlign: 'center' }}>{identity.logo.prompt}</p>
 
-                {activeTab === 'presentation' && (
-                    <div className="flex flex-col gap-8" dir={isRtl ? 'rtl' : 'ltr'}>
-                        {/* Slide 1: Title */}
-                        <div
-                            className="slide shadow-xl relative overflow-hidden"
-                            style={{
-                                width: '960px',
-                                height: '540px',
-                                backgroundColor: primary,
-                                color: 'white',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                                textAlign: 'center',
-                                padding: '40px',
-                                flexShrink: 0
-                            }}
-                        >
-                            {logoUrl && <img src={logoUrl} alt="Logo" style={{ height: '120px', marginBottom: '30px' }} />}
-                            <h1 style={{ fontFamily: `'${headerFont}', serif`, fontSize: '48pt', fontWeight: 'bold', marginBottom: '10px' }}>{companyName}</h1>
-                            <p style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '20pt', opacity: 0.9 }}>{identity.logo.style}</p>
-                        </div>
+                                {/* Color Palette - Table matching Word exactly */}
+                                <h2 style={{
+                                    fontFamily: `'${headerFont}', serif`,
+                                    color: primary,
+                                    fontSize: '13pt',
+                                    fontStyle: 'italic',
+                                    fontWeight: 'normal',
+                                    borderBottom: `1px solid ${primary}`,
+                                    paddingBottom: '4px',
+                                    marginTop: '15px',
+                                    marginBottom: '10px',
+                                }}>
+                                    {getText('docColorPalette')}
+                                </h2>
+                                <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '8px' }}>
+                                    <tbody>
+                                        <tr>
+                                            {identity.colorPalette.map((color, idx) => {
+                                                const textColor = getContrastColor(color.hex);
+                                                return (
+                                                    <td key={idx} style={{
+                                                        backgroundColor: color.hex,
+                                                        color: textColor,
+                                                        textAlign: 'center',
+                                                        padding: '20px 8px',
+                                                        width: `${100 / identity.colorPalette.length}%`,
+                                                        verticalAlign: 'middle',
+                                                        border: needsBorder(color.hex) ? '1px solid #E0E0E0' : 'none',
+                                                    }}>
+                                                        <div style={{ fontWeight: 'bold', fontSize: '9pt' }}>{color.hex}</div>
+                                                        <div style={{ fontSize: '8pt' }}>{color.name}</div>
+                                                    </td>
+                                                );
+                                            })}
+                                        </tr>
+                                    </tbody>
+                                </table>
 
-                        {/* Slide 2: Mission */}
-                        <div
-                            className="slide shadow-xl relative overflow-hidden"
-                            style={{
-                                width: '960px',
-                                height: '540px',
-                                backgroundColor: 'white',
-                                padding: '60px',
-                                flexShrink: 0
-                            }}
-                        >
-                            <div style={{
-                                position: 'absolute',
-                                top: logoPosition.vertical === 'header' ? '30px' : 'auto',
-                                bottom: logoPosition.vertical === 'footer' ? '30px' : 'auto',
-                                left: logoPosition.horizontal === 'left' ? '40px' : logoPosition.horizontal === 'center' ? '50%' : 'auto',
-                                right: logoPosition.horizontal === 'right' ? '40px' : 'auto',
-                                transform: logoPosition.horizontal === 'center' ? 'translateX(-50%)' : 'none',
-                                zIndex: 10
-                            }}>
-                                {logoUrl && <img src={logoUrl} alt="Logo" style={{ height: '40px' }} />}
-                            </div>
-                            <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '36pt', marginBottom: '40px' }}>Our Mission</h2>
-                            <p style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '24pt', color: text, lineHeight: 1.5 }}>{identity.logo.prompt}</p>
-                            <div style={{ position: 'absolute', bottom: '0', left: '0', width: '100%', height: '20px', backgroundColor: primary }}></div>
-                        </div>
-
-                        {/* Slide 3: Colors */}
-                        <div
-                            className="slide shadow-xl relative overflow-hidden"
-                            style={{
-                                width: '960px',
-                                height: '540px',
-                                backgroundColor: 'white',
-                                padding: '60px',
-                                flexShrink: 0
-                            }}
-                        >
-                            <div style={{
-                                position: 'absolute',
-                                top: logoPosition.vertical === 'header' ? '30px' : 'auto',
-                                bottom: logoPosition.vertical === 'footer' ? '30px' : 'auto',
-                                left: logoPosition.horizontal === 'left' ? '40px' : logoPosition.horizontal === 'center' ? '50%' : 'auto',
-                                right: logoPosition.horizontal === 'right' ? '40px' : 'auto',
-                                transform: logoPosition.horizontal === 'center' ? 'translateX(-50%)' : 'none',
-                                zIndex: 10
-                            }}>
-                                {logoUrl && <img src={logoUrl} alt="Logo" style={{ height: '40px' }} />}
-                            </div>
-                            <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '36pt', marginBottom: '40px' }}>Brand Colors</h2>
-                            <div style={{ display: 'flex', gap: '40px', justifyContent: 'center', marginTop: '60px' }}>
-                                {identity.colorPalette.map((color, idx) => (
-                                    <div key={idx} style={{ textAlign: 'center' }}>
-                                        <div style={{ width: '150px', height: '150px', backgroundColor: color.hex, borderRadius: '12px', marginBottom: '15px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}></div>
-                                        <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '14pt', fontWeight: 'bold', color: text }}>{color.hex}</div>
-                                        <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '12pt', color: secondary }}>{color.name}</div>
+                                {/* Typography */}
+                                <h2 style={{
+                                    fontFamily: `'${headerFont}', serif`,
+                                    color: primary,
+                                    fontSize: '13pt',
+                                    fontStyle: 'italic',
+                                    fontWeight: 'normal',
+                                    borderBottom: `1px solid ${primary}`,
+                                    paddingBottom: '4px',
+                                    marginTop: '20px',
+                                    marginBottom: '12px',
+                                }}>
+                                    {getText('docTypography')}
+                                </h2>
+                                <div style={{ marginBottom: '12px' }}>
+                                    <div style={{ fontFamily: `'${headerFont}', serif`, fontSize: '18pt', color: primary, marginBottom: '2px' }}>{headerFont}</div>
+                                    <div style={{ fontFamily: `'${headerFont}', serif`, fontSize: '10pt' }}>
+                                        {isRtl ? 'أبجد هوز حطي كلمن سعفص قرشت' : 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'}
                                     </div>
-                                ))}
+                                </div>
+                                <div>
+                                    <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '18pt', color: primary, marginBottom: '2px' }}>{bodyFont}</div>
+                                    <div style={{
+                                        fontFamily: `'${bodyFont}', sans-serif`,
+                                        fontSize: '10pt',
+                                        borderBottom: `1px solid ${primary}`,
+                                        paddingBottom: '8px',
+                                    }}>
+                                        {isRtl ? 'أبجد هوز حطي كلمن سعفص قرشت' : 'abcdefghijklmnopqrstuvwxyz'}
+                                    </div>
+                                </div>
                             </div>
-                            <div style={{ position: 'absolute', bottom: '0', left: '0', width: '100%', height: '20px', backgroundColor: primary }}></div>
-                        </div>
 
-                        {/* Slide 4: Typography */}
-                        <div
-                            className="slide shadow-xl relative overflow-hidden"
-                            style={{
-                                width: '960px',
-                                height: '540px',
-                                backgroundColor: 'white',
-                                padding: '60px',
-                                flexShrink: 0
-                            }}
-                        >
-                            <div style={{
-                                position: 'absolute',
-                                top: logoPosition.vertical === 'header' ? '30px' : 'auto',
-                                bottom: logoPosition.vertical === 'footer' ? '30px' : 'auto',
-                                left: logoPosition.horizontal === 'left' ? '40px' : logoPosition.horizontal === 'center' ? '50%' : 'auto',
-                                right: logoPosition.horizontal === 'right' ? '40px' : 'auto',
-                                transform: logoPosition.horizontal === 'center' ? 'translateX(-50%)' : 'none',
-                                zIndex: 10
-                            }}>
-                                {logoUrl && <img src={logoUrl} alt="Logo" style={{ height: '40px' }} />}
+                            {/* Footer */}
+                            <div style={{ marginTop: 'auto', textAlign: 'center', color: secondary, fontSize: '8pt', borderTop: '1px solid #eee', paddingTop: '10px' }}>
+                                {logoPosition.vertical === 'footer' && logoUrl && (
+                                    <div style={{
+                                        display: 'flex',
+                                        justifyContent: logoPosition.horizontal === 'left' ? 'flex-start' : logoPosition.horizontal === 'right' ? 'flex-end' : 'center',
+                                        marginBottom: '8px',
+                                    }}>
+                                        <img src={logoUrl} alt="Logo" style={{ height: '30px', objectFit: 'contain' }} />
+                                    </div>
+                                )}
+                                <span>{getText('docConfidential')} • {getText('docGeneratedOn')} {new Date().toLocaleDateString(isRtl ? 'ar-SA' : 'en-US')}</span>
                             </div>
-                            <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '36pt', marginBottom: '40px' }}>Typography</h2>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '30px' }}>
-                                <div>
-                                    <div style={{ fontFamily: `'${headerFont}', serif`, fontSize: '32pt', color: text, fontWeight: 'bold' }}>Header Font: {headerFont}</div>
-                                </div>
-                                <div>
-                                    <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '24pt', color: text }}>Body Font: {bodyFont}</div>
-                                </div>
-                                <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '18pt', color: secondary, marginTop: '20px' }}>
-                                    The quick brown fox jumps over the lazy dog.
-                                </div>
-                            </div>
-                            <div style={{ position: 'absolute', bottom: '0', left: '0', width: '100%', height: '20px', backgroundColor: primary }}></div>
                         </div>
-                    </div>
-                )}
+                    )}
+
+                    {activeTab === 'presentation' && (
+                        <div className="slides-container" dir={isRtl ? 'rtl' : 'ltr'}>
+                            {/* Slide 1: Title - Logo shown normally */}
+                            <div className="slide-wrapper">
+                                <div className="slide-label">
+                                    <span className="slide-label-number">01</span>
+                                    {getText('docSlideTitle')}
+                                </div>
+                                <div
+                                    className="slide-preview"
+                                    style={{
+                                        width: '960px',
+                                        height: '540px',
+                                        backgroundColor: primary,
+                                        color: 'white',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        justifyContent: 'center',
+                                        alignItems: 'center',
+                                        textAlign: 'center',
+                                        padding: '40px',
+                                        position: 'relative',
+                                    }}
+                                >
+                                    {logoUrl && <img src={logoUrl} alt="Logo" style={{ height: '120px', marginBottom: '24px' }} />}
+                                    <h1 style={{ fontFamily: `'${headerFont}', serif`, fontSize: '44pt', fontWeight: 'bold', marginBottom: '12px' }}>{companyName}</h1>
+                                    <p style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '18pt', opacity: 0.9 }}>{identity.logo.style}</p>
+                                </div>
+                            </div>
+
+                            {/* Slide 2: Mission - Logo position controlled */}
+                            <div className="slide-wrapper">
+                                <div className="slide-label">
+                                    <span className="slide-label-number">02</span>
+                                    {getText('docSlideMission')}
+                                </div>
+                                <div
+                                    className="slide-preview"
+                                    style={{
+                                        width: '960px',
+                                        height: '540px',
+                                        backgroundColor: 'white',
+                                        padding: logoPosition.horizontal === 'center' && logoPosition.vertical === 'header'
+                                            ? '100px 50px 50px 50px'
+                                            : '50px',
+                                        position: 'relative',
+                                    }}
+                                >
+                                    {logoUrl && (
+                                        <img
+                                            src={logoUrl}
+                                            alt="Logo"
+                                            style={getSlideLogoStyle()}
+                                        />
+                                    )}
+                                    <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '26pt', marginBottom: '20px' }}>
+                                        {getText('docOurMission')}
+                                    </h2>
+                                    <p style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '16pt', color: text, lineHeight: 1.6, maxWidth: '800px' }}>
+                                        {identity.logo.prompt}
+                                    </p>
+                                    <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: '16px', backgroundColor: primary }}></div>
+                                </div>
+                            </div>
+
+                            {/* Slide 3: Colors - Logo position controlled */}
+                            <div className="slide-wrapper">
+                                <div className="slide-label">
+                                    <span className="slide-label-number">03</span>
+                                    {getText('docSlideColors')}
+                                </div>
+                                <div
+                                    className="slide-preview"
+                                    style={{
+                                        width: '960px',
+                                        height: '540px',
+                                        backgroundColor: 'white',
+                                        padding: logoPosition.horizontal === 'center' && logoPosition.vertical === 'header'
+                                            ? '100px 50px 50px 50px'
+                                            : '50px',
+                                        position: 'relative',
+                                    }}
+                                >
+                                    {logoUrl && (
+                                        <img
+                                            src={logoUrl}
+                                            alt="Logo"
+                                            style={getSlideLogoStyle()}
+                                        />
+                                    )}
+                                    <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '26pt', marginBottom: '30px' }}>
+                                        {getText('docBrandColors')}
+                                    </h2>
+                                    <div style={{ display: 'flex', gap: '20px', justifyContent: 'center' }}>
+                                        {identity.colorPalette.map((color, idx) => (
+                                            <div key={idx} style={{ textAlign: 'center' }}>
+                                                <div style={{
+                                                    width: '100px',
+                                                    height: '100px',
+                                                    backgroundColor: color.hex,
+                                                    borderRadius: '10px',
+                                                    marginBottom: '10px',
+                                                    border: needsBorder(color.hex) ? '1px solid #E0E0E0' : 'none',
+                                                    boxSizing: 'border-box',
+                                                }}></div>
+                                                <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '11pt', fontWeight: 'bold', color: text }}>{color.hex}</div>
+                                                <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '9pt', color: secondary }}>{color.name}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: '16px', backgroundColor: primary }}></div>
+                                </div>
+                            </div>
+
+                            {/* Slide 4: Typography - Logo position controlled */}
+                            <div className="slide-wrapper">
+                                <div className="slide-label">
+                                    <span className="slide-label-number">04</span>
+                                    {getText('docSlideTypography')}
+                                </div>
+                                <div
+                                    className="slide-preview"
+                                    style={{
+                                        width: '960px',
+                                        height: '540px',
+                                        backgroundColor: 'white',
+                                        padding: logoPosition.horizontal === 'center' && logoPosition.vertical === 'header'
+                                            ? '100px 50px 50px 50px'
+                                            : '50px',
+                                        position: 'relative',
+                                    }}
+                                >
+                                    {logoUrl && (
+                                        <img
+                                            src={logoUrl}
+                                            alt="Logo"
+                                            style={getSlideLogoStyle()}
+                                        />
+                                    )}
+                                    <h2 style={{ fontFamily: `'${headerFont}', serif`, color: primary, fontSize: '26pt', marginBottom: '30px' }}>
+                                        {getText('docTypography')}
+                                    </h2>
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                                        <div style={{
+                                            padding: '16px',
+                                            background: `${primary}08`,
+                                            borderRadius: '10px',
+                                            borderLeft: `4px solid ${primary}`,
+                                        }}>
+                                            <div style={{ fontFamily: `'${headerFont}', serif`, fontSize: '22pt', color: text, fontWeight: 'bold' }}>
+                                                {getText('docHeaderFont')}: {headerFont}
+                                            </div>
+                                        </div>
+                                        <div style={{
+                                            padding: '16px',
+                                            background: `${secondary}08`,
+                                            borderRadius: '10px',
+                                            borderLeft: `4px solid ${secondary}`,
+                                        }}>
+                                            <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '16pt', color: text }}>
+                                                {getText('docBodyFont')}: {bodyFont}
+                                            </div>
+                                        </div>
+                                        <div style={{ fontFamily: `'${bodyFont}', sans-serif`, fontSize: '14pt', color: secondary, fontStyle: 'italic', marginTop: '4px' }}>
+                                            {getText('docQuickFox')}
+                                        </div>
+                                    </div>
+                                    <div style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: '16px', backgroundColor: primary }}></div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
             </div>
-
-            <style>{`
-                @media print {
-                    body * { visibility: hidden; }
-                    #documents-section, #documents-section * { visibility: visible; }
-                    #documents-section { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; border: none; box-shadow: none; }
-                    #documents-section > div:nth-child(2), #documents-section > div:first-child { display: none; }
-                    .slide { -webkit-print-color-adjust: exact; print-color-adjust: exact; page-break-after: always; }
-                }
-            `}</style>
         </div>
     );
 };
