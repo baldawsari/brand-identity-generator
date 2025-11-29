@@ -48,7 +48,7 @@ const brandIdentitySchema = {
       properties: {
         prompt: {
           type: Type.STRING,
-          description: "A detailed, visually descriptive prompt for an AI image generator to create a PRIMARY LOGO. It can describe a combination of symbols and text (the company name), or just a symbol, depending on the brand style."
+          description: "A detailed, visually descriptive prompt for an AI image generator to create an ICON or SYMBOL ONLY (NO TEXT, NO LETTERS, NO COMPANY NAME). Describe the visual elements, shapes, and symbolism. The company name will be added programmatically as text, so the logo mark should be purely graphical."
         },
         style: {
           type: Type.STRING,
@@ -103,9 +103,34 @@ const brandIdentitySchema = {
         }
       },
       required: ["header", "body", "notes"]
+    },
+    designSystem: {
+      type: Type.OBJECT,
+      properties: {
+        layoutStyle: {
+          type: Type.STRING,
+          enum: ["minimal", "bold", "corporate"],
+          description: "The overall visual style: 'minimal' for clean/modern, 'bold' for impactful/strong, 'corporate' for professional/traditional."
+        },
+        titleAlignment: {
+          type: Type.STRING,
+          enum: ["left", "center", "right"],
+          description: "Preferred text alignment for headings and titles."
+        },
+        borderRadius: {
+          type: Type.NUMBER,
+          description: "Default corner radius in pixels for UI elements (0 for sharp, 4-8 for subtle, 12-16 for rounded)."
+        },
+        accentPosition: {
+          type: Type.STRING,
+          enum: ["top", "bottom", "left", "right"],
+          description: "Where accent elements (lines, bars, highlights) should appear by default."
+        }
+      },
+      required: ["layoutStyle", "titleAlignment", "borderRadius", "accentPosition"]
     }
   },
-  required: ["companyName", "logo", "logoConcepts", "colorPalette", "fontPairings"]
+  required: ["companyName", "logo", "logoConcepts", "colorPalette", "fontPairings", "designSystem"]
 };
 
 
@@ -336,8 +361,6 @@ export const generateImage = async (prompt: string, colors?: string[]): Promise<
   });
 };
 
-const dataUrlToBase64 = (dataUrl: string): string => dataUrl.split(',')[1];
-
 export const generatePrimaryLogo = async (identity: BrandIdentity): Promise<string> => {
   const basePrompt = identity.logo.prompt;
   const colors = identity.colorPalette.map(c => c.name);
@@ -347,6 +370,16 @@ export const generatePrimaryLogo = async (identity: BrandIdentity): Promise<stri
   return primaryLogoUrl;
 };
 
+export const generateLogoMark = async (identity: BrandIdentity): Promise<string> => {
+  const iconPrompt = `${identity.logo.prompt}.
+    CRITICAL INSTRUCTIONS:
+    - Create a clean, flat vector-style ICON/SYMBOL ONLY
+    - Do NOT include any text, letters, words, or the company name
+    - Use a solid white or transparent background
+    - High contrast, simple shapes`;
+  const colors = identity.colorPalette.map(c => c.name);
+  return generateImage(iconPrompt, colors);
+};
 
 const logoRegenerationSchema = {
   type: Type.OBJECT,

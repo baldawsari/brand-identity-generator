@@ -1,0 +1,27 @@
+# Font Directory
+
+Place TTF font files here for bundling. Expected files:
+- Inter-Regular.ttf
+- Inter-Bold.ttf
+- Roboto-Regular.ttf
+- Roboto-Bold.ttf
+- Montserrat-Regular.ttf
+- Montserrat-Bold.ttf
+- Lato-Regular.ttf
+- Lato-Bold.ttf
+- OpenSans-Regular.ttf
+- OpenSans-Bold.ttf
+- Poppins-Regular.ttf
+- Poppins-Bold.ttf
+- PlayfairDisplay-Regular.ttf
+- PlayfairDisplay-Bold.ttf
+- Tajawal-Regular.ttf
+- Tajawal-Bold.ttf
+- Cairo-Regular.ttf
+- Cairo-Bold.ttf
+- Almarai-Regular.ttf
+- Almarai-Bold.ttf
+- IBMPlexSansArabic-Regular.ttf
+- IBMPlexSansArabic-Bold.ttf
+
+Download fonts from Google Fonts (https://fonts.google.com)

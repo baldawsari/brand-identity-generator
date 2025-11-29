@@ -12,6 +12,19 @@ export interface FontPair {
   notes: string;
 }
 
+export interface DesignSystem {
+  layoutStyle: 'minimal' | 'bold' | 'corporate';
+  titleAlignment: 'left' | 'center' | 'right';
+  borderRadius: number;
+  accentPosition: 'top' | 'bottom' | 'left' | 'right';
+}
+
+export interface LogoVariations {
+  horizontal?: string;
+  vertical?: string;
+  iconOnly?: string;
+}
+
 export interface BrandIdentity {
   companyName: string;
   logo: {
@@ -21,7 +34,10 @@ export interface BrandIdentity {
   logoConcepts: string[];
   colorPalette: ColorInfo[];
   fontPairings: FontPair;
+  designSystem?: DesignSystem;
   logoImage?: string; // Optional: for user-uploaded logos or primary generated logo
+  logoMark?: string; // AI-generated icon only (no text)
+  logoVariations?: LogoVariations; // Code-generated composite logos
 }
 
 export interface ChatMessage {
