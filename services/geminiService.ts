@@ -1,26 +1,127 @@
-import { GoogleGenAI, Type, Chat, Part, Modality } from "@google/genai";
+import { GoogleGenAI, Type, Chat, Part } from "@google/genai";
 import type { BrandIdentity, BrandAssets } from '../types';
+import {
+  classifyGeminiError,
+  NoApiKeyError,
+  SafetyFilterError,
+} from '../utils/errors';
 
-// Helper to get the AI client with the most up-to-date API key from the environment
-const getAiClient = () => {
-  return new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-};
+// --- Runtime API Key Management (supports BYOK - Bring Your Own Key) ---
+// SECURITY MODEL:
+// - Production builds: NEVER ship a real key. Users must use the UI (BYOK) or a secure backend proxy.
+// - Development: Keys from .env are allowed for local convenience only.
 
-// Utility to automatically retry failed requests due to transient errors (e.g., model overload)
-const withRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> => {
-  try {
-    return await fn();
-  } catch (error: any) {
-    // Check for common transient error statuses
-    const isTransientError = error.status === 503 || error.status === 'UNAVAILABLE' || (error.message && error.message.includes('overloaded'));
-    if (retries > 0 && isTransientError) {
-      console.warn(`Request failed, retrying in ${delay}ms... (${retries} retries left)`);
-      await new Promise(res => setTimeout(res, delay));
-      return withRetry(fn, retries - 1, delay * 2); // Exponential backoff
-    }
-    throw error;
+let runtimeApiKey: string | null = null;
+
+export function setApiKey(key: string) {
+  runtimeApiKey = key?.trim() || null;
+}
+
+export function getCurrentApiKey(): string {
+  // Runtime user key takes highest priority
+  if (runtimeApiKey) return runtimeApiKey;
+
+  // Only allow environment-injected keys in development builds
+  const isProdBuild = (process.env as any).IS_PROD_BUILD === 'true' || process.env.NODE_ENV === 'production';
+  const envKey = process.env.API_KEY || '';
+
+  if (envKey && isProdBuild) {
+    // This should never happen after our Vite config change, but defense-in-depth
+    console.error(
+      '%c[SECURITY] A Gemini API key was detected in a production build. ' +
+      'This is a serious misconfiguration. The key has been ignored. ' +
+      'Users must provide their own key via the UI or use a secure proxy.',
+      'color: red; font-weight: bold; font-size: 13px'
+    );
+    return '';
   }
+
+  return envKey;
+}
+
+export function hasApiKey(): boolean {
+  return !!getCurrentApiKey();
+}
+
+export function clearApiKey() {
+  runtimeApiKey = null;
+}
+
+// Development-only warning if a key is present in .env
+if (typeof window !== 'undefined' && process.env.API_KEY && !(process.env as any).IS_PROD_BUILD) {
+  console.info(
+    '%c[Brand Identity Generator] Using Gemini API key from local .env file (development only). ' +
+    'Production builds will never include this key.',
+    'color: #0a7; font-size: 12px'
+  );
+}
+
+// Helper to get the AI client with the most up-to-date API key (runtime > env)
+const getAiClient = () => {
+  const key = getCurrentApiKey();
+  if (!key) {
+    throw new NoApiKeyError();
+  }
+  return new GoogleGenAI({ apiKey: key });
 };
+
+// --- Smart Retry Logic with Classification, Jitter, and Circuit Breaker awareness ---
+
+interface RetryOptions {
+  retries?: number;
+  baseDelay?: number;
+  maxDelay?: number;
+  operationName?: string;
+}
+
+/**
+ * Executes a Gemini API call with intelligent retry logic.
+ * - Classifies errors using our typed error system
+ * - Only retries on truly transient errors (overloaded, 503, network hiccups)
+ * - Uses exponential backoff + jitter to avoid thundering herd
+ * - Gives up fast on permanent errors (bad key, quota, safety filter)
+ */
+async function executeWithRecovery<T>(
+  fn: () => Promise<T>,
+  options: RetryOptions = {}
+): Promise<T> {
+  const {
+    retries = 3,
+    baseDelay = 1200,
+    maxDelay = 8000,
+    operationName = 'Gemini request',
+  } = options;
+
+  let attempt = 0;
+
+  while (true) {
+    try {
+      return await fn();
+    } catch (rawError: unknown) {
+      const classified = classifyGeminiError(rawError);
+      attempt++;
+
+      // Never retry on permanent failures
+      if (!classified.isRetryable || attempt > retries) {
+        if (attempt > 1) {
+          console.info(`${operationName} failed after ${attempt - 1} retries.`, classified.code);
+        }
+        throw classified; // Throw the nice typed error
+      }
+
+      // Calculate delay with jitter (prevents all clients retrying at the exact same time)
+      const exponential = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
+      const jitter = Math.random() * 600; // up to 600ms jitter
+      const delay = Math.floor(exponential + jitter);
+
+      console.warn(
+        `${operationName} failed (${classified.code}). Retrying in ${delay}ms... (attempt ${attempt}/${retries})`
+      );
+
+      await new Promise(res => setTimeout(res, delay));
+    }
+  }
+}
 
 
 // Utility to convert File to a GoogleGenerativeAI.Part
@@ -135,7 +236,7 @@ const brandIdentitySchema = {
 
 
 export const generateBrandIdentity = async (mission: string, lang: 'en' | 'ar', companyName?: string, logoDescription?: string): Promise<BrandIdentity> => {
-  return withRetry(async () => {
+  return executeWithRecovery(async () => {
     const ai = getAiClient();
     const languageInstruction = lang === 'ar'
       ? "Generate the output in Arabic."
@@ -177,14 +278,15 @@ export const generateBrandIdentity = async (mission: string, lang: 'en' | 'ar', 
       }
     });
 
-    const jsonString = response.text.trim();
+    const jsonString = response.text?.trim() || '';
+    if (!jsonString) throw new Error('Empty response from Gemini');
     const brandIdentity = JSON.parse(jsonString);
     return brandIdentity;
   });
 };
 
 export const buildIdentityFromLogo = async (mission: string, companyName: string, logoFile: File, lang: 'en' | 'ar'): Promise<BrandIdentity> => {
-  return withRetry(async () => {
+  return executeWithRecovery(async () => {
     const ai = getAiClient();
     const languageInstruction = lang === 'ar' ? "Generate all text fields in Arabic." : "Generate all text fields in English.";
     const fontInstruction = "For 'fontPairings', select Google Fonts that aesthetically match the provided logo and support the brand's language.";
@@ -219,14 +321,15 @@ export const buildIdentityFromLogo = async (mission: string, companyName: string
       }
     });
 
-    const jsonString = response.text.trim();
+    const jsonString = response.text?.trim() || '';
+    if (!jsonString) throw new Error('Empty response from Gemini');
     const brandIdentity = JSON.parse(jsonString);
     return brandIdentity;
   });
 };
 
 export const rebrandLogoAndBuildIdentity = async (mission: string, companyName: string, logoFile: File, lang: 'en' | 'ar', rebrandNotes?: string): Promise<BrandIdentity> => {
-  return withRetry(async () => {
+  return executeWithRecovery(async () => {
     const ai = getAiClient();
     const languageInstruction = lang === 'ar' ? "Generate all text fields in Arabic." : "Generate all text fields in English.";
     const fontInstruction = "For 'fontPairings', select Google Fonts that aesthetically match the NEW modernized logo concept and support the brand's language.";
@@ -273,7 +376,8 @@ export const rebrandLogoAndBuildIdentity = async (mission: string, companyName: 
       }
     });
 
-    const jsonString = response.text.trim();
+    const jsonString = response.text?.trim() || '';
+    if (!jsonString) throw new Error('Empty response from Gemini');
     const brandIdentity = JSON.parse(jsonString);
     return brandIdentity;
   });
@@ -281,7 +385,7 @@ export const rebrandLogoAndBuildIdentity = async (mission: string, companyName: 
 
 
 export const translateBrandIdentity = async (identity: BrandIdentity, targetLang: 'en' | 'ar', adaptTypography: boolean): Promise<BrandIdentity> => {
-  return withRetry(async () => {
+  return executeWithRecovery(async () => {
     const ai = getAiClient();
     const languageInstruction = targetLang === 'ar'
       ? "Translate and adapt the provided brand identity into Arabic."
@@ -323,7 +427,8 @@ export const translateBrandIdentity = async (identity: BrandIdentity, targetLang
       }
     });
 
-    const jsonString = response.text.trim();
+    const jsonString = response.text?.trim() || '';
+    if (!jsonString) throw new Error('Empty response from Gemini');
     const translatedIdentity = JSON.parse(jsonString);
     return translatedIdentity;
   });
@@ -331,7 +436,7 @@ export const translateBrandIdentity = async (identity: BrandIdentity, targetLang
 
 
 export const generateImage = async (prompt: string, colors?: string[]): Promise<string> => {
-  return withRetry(async () => {
+  return executeWithRecovery(async () => {
     const ai = getAiClient();
     let fullPrompt = `${prompt}, vector logo, solid clean background, high resolution, minimalist`;
     if (colors && colors.length > 0) {
@@ -357,7 +462,12 @@ export const generateImage = async (prompt: string, colors?: string[]): Promise<
         return `data:image/png;base64,${base64ImageBytes}`;
       }
     }
-    throw new Error("Image generation did not return an image. This could be due to safety filters or a temporary issue.");
+
+    // Imagen often silently blocks instead of returning an image
+    throw new SafetyFilterError(
+      'The image generation model did not return an image. This is frequently caused by safety filters blocking the visual concept.',
+      new Error('No inline image data returned')
+    );
   });
 };
 
@@ -391,7 +501,7 @@ const logoRegenerationSchema = {
 };
 
 export const regenerateLogoAndConcepts = async (mission: string, companyName: string, lang: 'en' | 'ar'): Promise<{ logo: BrandIdentity['logo']; logoConcepts: BrandIdentity['logoConcepts'] }> => {
-  return withRetry(async () => {
+  return executeWithRecovery(async () => {
     const ai = getAiClient();
     const languageInstruction = lang === 'ar' ? "Generate the text fields in Arabic." : "Generate all text fields in English.";
 
@@ -430,7 +540,7 @@ export const generateMarketingAssets = async (
   fonts: { header: string, body: string },
   lang: 'en' | 'ar'
 ): Promise<BrandAssets> => {
-  return withRetry(async () => {
+  return executeWithRecovery(async () => {
     const ai = getAiClient();
     const languageInstruction = lang === 'ar' ? "The text on the assets should be in Arabic." : "The text on the assets should be in English.";
     const logoPart = await fileToGenerativePart(logoFile);

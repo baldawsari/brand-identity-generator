@@ -150,7 +150,7 @@ export const getBundledFontPath = (
     ? (weight >= 600 ? 'Bold' : 'Regular')
     : weight;
 
-  const slug = info.slug;
+  const _slug = info.slug;
   const fileName = `${fontName.replace(/\s/g, '')}-${weightStr}.ttf`;
 
   return `/fonts/${fileName}`;

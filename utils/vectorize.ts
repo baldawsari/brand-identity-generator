@@ -69,7 +69,7 @@ function imageToBitmap(imageData: ImageData, threshold: number = 128): boolean[]
 /**
  * Simple edge detection for bitmap
  */
-function findEdges(bitmap: boolean[][]): { x: number; y: number }[] {
+function _findEdges(bitmap: boolean[][]): { x: number; y: number }[] {
   const height = bitmap.length;
   const width = bitmap[0]?.length || 0;
   const edges: { x: number; y: number }[] = [];

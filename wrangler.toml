@@ -1,0 +1,12 @@
+name = "brand-identity-generator"
+compatibility_date = "2025-04-01"
+pages_build_output_dir = "dist"
+
+[build]
+command = "npm run build"
+cwd = "."
+watch_paths = ["src", "public"]
+
+[env.production.vars]
+# Add your variables here or via the Cloudflare dashboard
+# GEMINI_API_KEY = "your_key_here"  # Only if using a default key (not recommended)

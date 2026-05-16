@@ -1,12 +1,115 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { generateBrandIdentity, translateBrandIdentity, buildIdentityFromLogo, rebrandLogoAndBuildIdentity, regenerateLogoAndConcepts, generateLogoMark } from './services/geminiService';
+import React, { useState, useCallback, useEffect, Suspense } from 'react';
+import {
+  generateBrandIdentity,
+  translateBrandIdentity,
+  buildIdentityFromLogo,
+  rebrandLogoAndBuildIdentity,
+  regenerateLogoAndConcepts,
+  generateLogoMark,
+  setApiKey,
+  getCurrentApiKey,
+  hasApiKey,
+  clearApiKey,
+} from './services/geminiService';
 import type { BrandIdentity } from './types';
 import BrandBible from './components/BrandBible';
-import BrandAssetsComponent from './components/BrandAssets';
-import DocumentTemplates from './components/DocumentTemplates';
-import ChatBot from './components/ChatBot';
+import { ErrorBoundary } from './components/ErrorBoundary';
+
+// Lazy load heavy components to reduce initial bundle size
+const DocumentTemplates = React.lazy(() => import('./components/DocumentTemplates'));
+const BrandAssetsComponent = React.lazy(() => import('./components/BrandAssets'));
+const ChatBot = React.lazy(() => import('./components/ChatBot'));
+
+// Reusable nice fallback for Suspense (used for lazy-loaded heavy components)
+const LoadingFallback: React.FC<{ message?: string }> = ({ message = "Loading..." }) => (
+  <div className="flex flex-col items-center justify-center py-10 text-gray-500">
+    <div className="animate-spin w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full mb-3" />
+    <span className="text-sm">{message}</span>
+  </div>
+);
 import { LoadingSpinner, SparklesIcon, CloseIcon, ChevronDownIcon } from './components/icons';
 import { LanguageProvider, useLanguage } from './LanguageContext';
+
+const ApiKeyModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  onSave: (key: string) => void;
+  currentStatus: 'none' | 'env' | 'user';
+}> = ({ isOpen, onClose, onSave, currentStatus }) => {
+  const [localKey, setLocalKey] = useState('');
+
+  useEffect(() => {
+    if (!isOpen) setLocalKey('');
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black bg-opacity-60 z-[60] flex items-center justify-center p-4 animate-fade-in"
+      onClick={onClose}
+      aria-modal="true"
+      role="dialog"
+    >
+      <div
+        className="bg-white rounded-2xl shadow-2xl p-6 md:p-8 w-full max-w-md transform animate-fade-in-up text-start"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-bold text-gray-800">Gemini API Key Required</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <CloseIcon className="w-6 h-6" />
+          </button>
+        </div>
+
+        <div className="text-sm text-gray-600 space-y-3">
+          <p>
+            This app uses Google Gemini to generate brands. For security, your API key is never stored on any server and is only kept in your browser session.
+          </p>
+          <p>
+            Get a free key at <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">Google AI Studio</a>.
+          </p>
+        </div>
+
+        <div className="mt-5">
+          <input
+            type="password"
+            value={localKey}
+            onChange={(e) => setLocalKey(e.target.value)}
+            placeholder="Paste your Gemini API key (starts with AIza...)"
+            className="w-full p-3 border border-gray-300 rounded-lg font-mono text-sm focus:ring-2 focus:ring-indigo-500"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && localKey.trim()) {
+                onSave(localKey);
+              }
+            }}
+          />
+        </div>
+
+        <div className="mt-4 flex gap-3">
+          <button
+            onClick={() => onSave(localKey)}
+            disabled={!localKey.trim()}
+            className="flex-1 bg-indigo-600 text-white font-semibold py-2.5 px-4 rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 transition-colors"
+          >
+            Save & Continue
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-1 bg-white text-gray-700 font-semibold py-2.5 px-4 rounded-lg hover:bg-gray-100 border border-gray-300 transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+
+        {currentStatus === 'env' && (
+          <p className="mt-3 text-xs text-green-600">A key is already configured for local development.</p>
+        )}
+      </div>
+    </div>
+  );
+};
+
 
 const TranslationModal: React.FC<{
   isOpen: boolean;
@@ -73,6 +176,11 @@ const TranslationModal: React.FC<{
 
 
 const AppContent: React.FC = () => {
+  // API Key management (BYOK - Bring Your Own Key)
+  const [apiKeyInput, setApiKeyInput] = useState<string>('');
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState<boolean>(false);
+  const [apiKeyStatus, setApiKeyStatus] = useState<'none' | 'env' | 'user'>('none');
+
   // Core inputs
   const [mission, setMission] = useState<string>('');
   const [providedCompanyName, setProvidedCompanyName] = useState<string>('');
@@ -102,8 +210,25 @@ const AppContent: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const { lang, setLanguage, t } = useLanguage();
 
+  // Sync API key status (checks both user-provided and env-injected key)
+  const refreshApiKeyStatus = useCallback(() => {
+    const currentKey = getCurrentApiKey();
+    if (!currentKey) {
+      setApiKeyStatus('none');
+    } else if (getCurrentApiKey() && !apiKeyInput && process.env.API_KEY) {
+      // Key is coming from environment (local dev)
+      setApiKeyStatus('env');
+    } else {
+      setApiKeyStatus('user');
+    }
+  }, [apiKeyInput]);
 
+  useEffect(() => {
+    refreshApiKeyStatus();
+  }, [refreshApiKeyStatus]);
 
+  // Note: handleSetApiKey and handleClearApiKey logic is currently handled inline in the modal / status pill.
+  // They are kept for potential future "Clear Key" UI.
 
   const clearResults = () => {
     setOriginalBrandBible(null);
@@ -115,6 +240,11 @@ const AppContent: React.FC = () => {
 
   const handleGenerate = useCallback(async () => {
     // --- Validation ---
+    if (!hasApiKey()) {
+      setIsApiKeyModalOpen(true);
+      setError('Please set your Gemini API key to continue.');
+      return;
+    }
     if (!mission.trim()) {
       setError(t('errorMission'));
       return;
@@ -184,11 +314,18 @@ const AppContent: React.FC = () => {
       }
     } catch (err: any) {
       console.error(err);
-      if (err.message && err.message.includes("Requested entity was not found")) {
-        // setHasApiKey(false); // Reset key state to force re-selection
-        setError("API Key invalid or expired. Please select your key again.");
+
+      // Use our new typed error system for better messages
+      if (err?.code === 'NO_API_KEY' || err?.message === 'NO_API_KEY') {
+        setIsApiKeyModalOpen(true);
+        setError('Please set your Gemini API key to continue.');
+      } else if (err?.userMessage) {
+        // Typed GeminiError
+        setError(err.userMessage);
+      } else if (err.message && err.message.includes("Requested entity was not found")) {
+        setError("API Key invalid or expired. Please check your key.");
       } else {
-        setError(`Error: ${err.message || JSON.stringify(err)}`);
+        setError(`Error: ${err.message || 'Something went wrong. Please try again.'}`);
       }
     } finally {
       setIsLoading(false);
@@ -214,9 +351,9 @@ const AppContent: React.FC = () => {
 
       setTranslatedBrandBible(translatedIdentity);
       setLanguage(targetLang);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setError(t('errorTranslate'));
+      setError(err?.userMessage || t('errorTranslate'));
     } finally {
       setIsTranslating(false);
     }
@@ -242,9 +379,9 @@ const AppContent: React.FC = () => {
       const logoMarkUrl = await generateLogoMark(updatedBible);
       setOriginalBrandBible(prev => prev ? { ...prev, logoMark: logoMarkUrl, logoImage: logoMarkUrl } : null);
 
-    } catch (err) {
+    } catch (err: any) {
       console.error("Regeneration error:", err);
-      setError(t('errorGenerate'));
+      setError(err?.userMessage || t('errorGenerate'));
     } finally {
       setIsRegeneratingLogo(false);
     }
@@ -261,10 +398,24 @@ const AppContent: React.FC = () => {
     <div className="min-h-screen bg-gray-50">
       <main className="container mx-auto px-4 py-8 md:py-16">
         <div className="max-w-3xl mx-auto text-center">
-          <div className="inline-flex items-center bg-indigo-100 text-indigo-700 text-sm font-semibold px-4 py-1 rounded-full mb-4">
-            <SparklesIcon className="w-5 h-5 me-2" />
-            {t('poweredBy')}
+          <div className="flex items-center justify-center gap-3 mb-4">
+            <div className="inline-flex items-center bg-indigo-100 text-indigo-700 text-sm font-semibold px-4 py-1 rounded-full">
+              <SparklesIcon className="w-5 h-5 me-2" />
+              {t('poweredBy')}
+            </div>
+            <button
+              onClick={() => setIsApiKeyModalOpen(true)}
+              className={`text-xs font-medium px-3 py-1 rounded-full border transition-colors ${
+                apiKeyStatus === 'user' ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100' :
+                apiKeyStatus === 'env' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+              }`}
+              title={apiKeyStatus === 'user' ? 'Using your personal API key (secure)' : apiKeyStatus === 'env' ? 'Using local dev key from .env' : 'Click to set your Gemini API key'}
+            >
+              {apiKeyStatus === 'user' ? 'Personal Key' : apiKeyStatus === 'env' ? 'Dev Key' : 'Set API Key'}
+            </button>
           </div>
+
           <h1 className="text-4xl md:text-5xl font-extrabold text-gray-900 tracking-tight">
             {t('mainHeading')}
           </h1>
@@ -382,16 +533,18 @@ const AppContent: React.FC = () => {
         )}
 
         {displayedBible && (
-          <BrandBible
-            identity={displayedBible}
-            isLoadingLogo={isLoadingLogo}
-            onInitiateTranslate={handleInitiateTranslate}
-            isTranslating={isTranslating}
-            showTranslateButton={showTranslateButton}
-            isBilingualReady={isBilingualReady}
-            onRegenerateLogo={handleRegenerateLogo}
-            isRegeneratingLogo={isRegeneratingLogo}
-          />
+          <ErrorBoundary>
+            <BrandBible
+              identity={displayedBible}
+              isLoadingLogo={isLoadingLogo}
+              onInitiateTranslate={handleInitiateTranslate}
+              isTranslating={isTranslating}
+              showTranslateButton={showTranslateButton}
+              isBilingualReady={isBilingualReady}
+              onRegenerateLogo={handleRegenerateLogo}
+              isRegeneratingLogo={isRegeneratingLogo}
+            />
+          </ErrorBoundary>
         )}
 
         {displayedBible && (
@@ -405,24 +558,62 @@ const AppContent: React.FC = () => {
                 Generate Documents Assets
               </button>
             )}
-            {showDocuments && <DocumentTemplates identity={displayedBible} lang={lang} />}
+            {showDocuments && (
+              <ErrorBoundary>
+                <Suspense fallback={<LoadingFallback message="Loading export tools..." />}>
+                  <DocumentTemplates identity={displayedBible} lang={lang} />
+                </Suspense>
+              </ErrorBoundary>
+            )}
           </div>
         )}
 
         {/* Marketing Assets - show for any brand identity with a logo */}
         {displayedBible && displayedBible.logoImage && (
-          <BrandAssetsComponent
-            identity={displayedBible}
-            logoUrl={displayedBible.logoMark || displayedBible.logoImage}
-          />
+          <ErrorBoundary>
+            <Suspense fallback={<LoadingFallback message="Loading marketing asset previews..." />}>
+              <BrandAssetsComponent
+                identity={displayedBible}
+                logoUrl={displayedBible.logoMark || displayedBible.logoImage}
+              />
+            </Suspense>
+          </ErrorBoundary>
         )}
       </main>
-      <ChatBot />
+      <Suspense fallback={null}>
+        <ChatBot />
+      </Suspense>
+      <ApiKeyModal
+        isOpen={isApiKeyModalOpen}
+        onClose={() => setIsApiKeyModalOpen(false)}
+        onSave={(key) => {
+          if (key?.trim()) {
+            setApiKey(key.trim());
+            setApiKeyStatus('user');
+          }
+          setIsApiKeyModalOpen(false);
+        }}
+        currentStatus={apiKeyStatus}
+      />
       <TranslationModal
         isOpen={isTranslationModalOpen}
         onClose={() => setIsTranslationModalOpen(false)}
         onConfirm={handleConfirmTranslation}
       />
+
+      {/* Safety & Attribution Footer (recommended for Gemini-powered apps) */}
+      <footer className="mt-16 pb-8 text-center text-xs text-gray-400">
+        Brand identities are generated using{' '}
+        <a
+          href="https://ai.google.dev/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline hover:text-gray-500"
+        >
+          Gemini
+        </a>{' '}
+        by Google. Results may vary. Always review AI-generated assets before use.
+      </footer>
     </div>
   );
 };

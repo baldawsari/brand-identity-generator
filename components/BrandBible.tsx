@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import type { BrandIdentity, LogoVariations } from '../types';
+import type { BrandIdentity } from '../types';
 import { ColorInfo, FontPair } from '../types';
 import { LoadingSpinner, CloseIcon, RefreshIcon } from './icons';
 import { useLanguage } from '../LanguageContext';
 import { LogoCompositor, LogoLayout } from './LogoCompositor';
+import { pngToColorSvg, downloadSvg } from '../utils/vectorize';
+import { downloadBrandKit } from '../utils/brandKitExporter';
 
 interface BrandBibleProps {
     identity: BrandIdentity | null;
@@ -74,14 +76,19 @@ const FontPreviewModal: React.FC<{ fontName: string; isOpen: boolean; onClose: (
     );
 };
 
-const LogoDisplay: React.FC<{ identity: BrandIdentity; isLoadingLogo: boolean; onRegenerate: () => void; isRegenerating: boolean; }> = ({ identity, isLoadingLogo, onRegenerate, isRegenerating }) => {
+const LogoDisplay: React.FC<{
+    identity: BrandIdentity;
+    isLoadingLogo: boolean;
+    onRegenerate: () => void;
+    isRegenerating: boolean;
+    logoVariations: Record<LogoLayout, string | null>;
+    onLogoVariationsChange: (variations: Record<LogoLayout, string | null>) => void;
+}> = ({ identity, isLoadingLogo, onRegenerate, isRegenerating, logoVariations, onLogoVariationsChange }) => {
     const { t, lang } = useLanguage();
     const [activeLayout, setActiveLayout] = useState<LogoLayout>('horizontal');
-    const [compositedLogos, setCompositedLogos] = useState<Record<LogoLayout, string | null>>({
-        horizontal: null,
-        vertical: null,
-        'icon-only': null,
-    });
+
+    // Use the lifted state
+    const compositedLogos = logoVariations;
 
     // Check if this is a user-uploaded logo (blob URL) - can't composite those
     const isUserUploadedLogo = identity.logoImage?.startsWith('blob:');
@@ -94,7 +101,21 @@ const LogoDisplay: React.FC<{ identity: BrandIdentity; isLoadingLogo: boolean; o
     const isRtl = lang === 'ar';
 
     const handleExport = (layout: LogoLayout, dataUrl: string) => {
-        setCompositedLogos(prev => ({ ...prev, [layout]: dataUrl }));
+        const updated = { ...compositedLogos, [layout]: dataUrl };
+        onLogoVariationsChange(updated);
+    };
+
+    const handleDownloadSvg = async () => {
+        if (!iconUrl) return;
+        try {
+            const svgString = await pngToColorSvg(iconUrl, primaryColor);
+            const safeName = identity.companyName.toLowerCase().replace(/\s+/g, '-');
+            downloadSvg(svgString, `${safeName}-icon.svg`);
+        } catch (err) {
+            console.error('SVG conversion failed:', err);
+            // Fallback: at least tell the user
+            alert('Could not generate SVG. The PNG version is still available.');
+        }
     };
 
     const layoutOptions: { key: LogoLayout; label: string }[] = [
@@ -110,16 +131,28 @@ const LogoDisplay: React.FC<{ identity: BrandIdentity; isLoadingLogo: boolean; o
                     <h3 className="text-xl font-bold text-gray-800">{identity.companyName}</h3>
                     <p className="text-sm text-gray-500">{t('primaryLogo')} ({identity.logo.style})</p>
                 </div>
-                {canRegenerate && (
-                    <button
-                        onClick={onRegenerate}
-                        disabled={isRegenerating || isLoadingLogo}
-                        className="flex items-center gap-2 text-sm font-semibold text-indigo-600 hover:text-indigo-800 disabled:text-gray-400 transition-colors rounded-lg px-3 py-1.5 hover:bg-indigo-50 disabled:bg-gray-100"
-                    >
-                        {isRegenerating ? <LoadingSpinner className="w-4 h-4" /> : <RefreshIcon className="w-4 h-4" />}
-                        <span>{isRegenerating ? t('regenerating') : t('regenerateLogo')}</span>
-                    </button>
-                )}
+                <div className="flex items-center gap-2">
+                    {canRegenerate && (
+                        <button
+                            onClick={onRegenerate}
+                            disabled={isRegenerating || isLoadingLogo}
+                            className="flex items-center gap-2 text-sm font-semibold text-indigo-600 hover:text-indigo-800 disabled:text-gray-400 transition-colors rounded-lg px-3 py-1.5 hover:bg-indigo-50 disabled:bg-gray-100"
+                        >
+                            {isRegenerating ? <LoadingSpinner className="w-4 h-4" /> : <RefreshIcon className="w-4 h-4" />}
+                            <span>{isRegenerating ? t('regenerating') : t('regenerateLogo')}</span>
+                        </button>
+                    )}
+
+                    {!isUserUploadedLogo && iconUrl && (
+                        <button
+                            onClick={handleDownloadSvg}
+                            className="flex items-center gap-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 border border-gray-200 hover:border-gray-300 px-3 py-1.5 rounded-lg transition-colors"
+                            title="Download icon as SVG (vector)"
+                        >
+                            <span>SVG</span>
+                        </button>
+                    )}
+                </div>
             </div>
 
             {/* Layout selector - only show if not a user-uploaded logo */}
@@ -315,6 +348,16 @@ const LogoConcepts: React.FC<{ concepts: string[], isRegenerating: boolean }> = 
 const BrandBible: React.FC<BrandBibleProps> = ({ identity, isLoadingLogo, onInitiateTranslate, isTranslating, showTranslateButton, isBilingualReady, onRegenerateLogo, isRegeneratingLogo }) => {
     const { lang, setLanguage, t } = useLanguage();
 
+    // Lifted logo variation state so the Brand Kit exporter can access the final PNGs
+    const [logoVariations, setLogoVariations] = useState<Record<LogoLayout, string | null>>({
+        horizontal: null,
+        vertical: null,
+        'icon-only': null,
+    });
+
+    // Brand Kit export loading state (important UX polish)
+    const [isExportingKit, setIsExportingKit] = useState(false);
+
     if (!identity) {
         return null;
     }
@@ -323,6 +366,34 @@ const BrandBible: React.FC<BrandBibleProps> = ({ identity, isLoadingLogo, onInit
         <div className="mt-8 p-4 md:p-8 bg-gray-100 rounded-2xl animate-fade-in">
             <div className="flex justify-center items-center mb-6 relative">
                 <h2 className="text-3xl font-bold text-gray-900">{t('brandBibleTitle')}</h2>
+
+                <button
+                    onClick={async () => {
+                        setIsExportingKit(true);
+                        try {
+                            const iconUrl = identity.logoMark || identity.logoImage || '';
+                            const variations = {
+                                'icon-only': logoVariations['icon-only'] || iconUrl,
+                                horizontal: logoVariations.horizontal || undefined,
+                                vertical: logoVariations.vertical || undefined,
+                            };
+                            await downloadBrandKit(identity, iconUrl, variations);
+                        } finally {
+                            setIsExportingKit(false);
+                        }
+                    }}
+                    disabled={isExportingKit}
+                    className="absolute start-0 flex items-center gap-2 bg-white text-gray-700 font-semibold py-2 px-4 rounded-lg hover:bg-gray-100 border border-gray-200 text-sm disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                >
+                    {isExportingKit ? (
+                        <>
+                            <LoadingSpinner className="w-4 h-4" />
+                            <span>Preparing...</span>
+                        </>
+                    ) : (
+                        <span>Download Brand Kit</span>
+                    )}
+                </button>
 
                 {showTranslateButton && (
                     <button
@@ -361,7 +432,14 @@ const BrandBible: React.FC<BrandBibleProps> = ({ identity, isLoadingLogo, onInit
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Logo Display - Full width on mobile, half on desktop */}
                 <div className="lg:row-span-2">
-                    <LogoDisplay identity={identity} isLoadingLogo={isLoadingLogo} onRegenerate={onRegenerateLogo} isRegenerating={isRegeneratingLogo} />
+                    <LogoDisplay
+                        identity={identity}
+                        isLoadingLogo={isLoadingLogo}
+                        onRegenerate={onRegenerateLogo}
+                        isRegenerating={isRegeneratingLogo}
+                        logoVariations={logoVariations}
+                        onLogoVariationsChange={setLogoVariations}
+                    />
                 </div>
                 {/* Color Palette */}
                 <div>

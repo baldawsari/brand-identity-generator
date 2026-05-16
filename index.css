@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+/* Optional custom styles */
+:root {
+  --primary: #6366f1;
+}
+
+body {
+  font-feature-settings: "tnum";
+}
+
+/* Improve focus styles for accessibility */
+:focus-visible {
+  outline: 2px solid #6366f1;
+  outline-offset: 2px;
+}

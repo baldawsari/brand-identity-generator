@@ -224,7 +224,7 @@ export const LogoVariationsGenerator: React.FC<LogoCompositorDisplayProps> = ({
   isRtl = false,
   onVariationsGenerated,
 }) => {
-  const [variations, setVariations] = useState<{
+  const [, setVariations] = useState<{
     horizontal?: string;
     vertical?: string;
     iconOnly?: string;

@@ -17,7 +17,18 @@ npm run preview    # Preview production build
 
 ## Environment Setup
 
-Set `GEMINI_API_KEY` in `.env.local` file. The key is exposed to the client via Vite's `define` config as `process.env.API_KEY` and `process.env.GEMINI_API_KEY`.
+**Security Model (Production-Ready)**
+
+The app follows a "Bring Your Own Key" (BYOK) + safe dev fallback model:
+
+- **Production builds**: No API key is ever baked into the client bundle (Vite `define` only injects keys in `development` mode).
+- Users provide their Gemini key via the in-app "Set API Key" button (stored only in memory).
+- **Local development**: You may place `GEMINI_API_KEY` in `.env` (or `.env.local`). It will be available only during `npm run dev`.
+- Copy `.env.example` to `.env` and add your key for local work.
+
+A runtime security guard + console warnings prevent accidental key leakage in production bundles.
+
+For hosted/SaaS deployments with a shared key, implement a lightweight serverless proxy (Phase 1b of the production plan).
 
 ## Architecture
 

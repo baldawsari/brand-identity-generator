@@ -52,7 +52,7 @@ const BrandAssetsComponent: React.FC<BrandAssetsProps> = ({ identity, logoUrl })
   // Modal state
   const [selectedAsset, setSelectedAsset] = useState<AssetPreview | null>(null);
 
-  // Generate image from template ref
+  // Generate image from template ref (with improved font loading)
   const generateImage = useCallback(async (
     ref: React.RefObject<HTMLDivElement>,
     assetName: string,
@@ -61,8 +61,15 @@ const BrandAssetsComponent: React.FC<BrandAssetsProps> = ({ identity, logoUrl })
     if (!ref.current) return null;
 
     try {
-      // Wait a bit for fonts to load
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Wait for fonts to load more reliably than a fixed timeout
+      // This is much better than the previous 500ms hack
+      await Promise.race([
+        document.fonts.ready,
+        new Promise(resolve => setTimeout(resolve, 1200)), // max wait
+      ]);
+
+      // Small extra delay to ensure layout is stable
+      await new Promise(resolve => setTimeout(resolve, 80));
 
       const dataUrl = await toPng(ref.current, {
         quality: 1,
@@ -83,8 +90,8 @@ const BrandAssetsComponent: React.FC<BrandAssetsProps> = ({ identity, logoUrl })
       // Reset all to generating state
       setAssets(prev => prev.map(a => ({ ...a, isGenerating: true, imageUrl: null })));
 
-      // Small delay to ensure templates are rendered
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // Give the hidden template components a moment to mount and render
+      await new Promise(resolve => setTimeout(resolve, 150));
 
       // Generate each asset
       const results = await Promise.all([
